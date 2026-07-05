@@ -1,13 +1,21 @@
 from fastapi import FastAPI
 
+from app import models  # noqa: F401
 from app.config import get_settings
-from app.db import check_db_connection
+from app.db import Base, check_db_connection, engine
 from app.k8s_client import check_kubernetes_connection
+from app.routers.projects import router as projects_router
 
 
 settings = get_settings()
 
 app = FastAPI(title=settings.app_name)
+app.include_router(projects_router)
+
+
+@app.on_event("startup")
+def create_database_tables() -> None:
+    Base.metadata.create_all(bind=engine)
 
 
 @app.get("/")

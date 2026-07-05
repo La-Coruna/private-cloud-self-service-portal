@@ -73,3 +73,71 @@ http://127.0.0.1:8000/health
 - Namespace 생성 기능
 - Deployment/Service 생성 기능
 - Pod 상태 조회 기능
+
+## Phase 2: Project Request API and Namespace Provisioning
+
+This phase adds the first self-service project request flow:
+
+- `POST /api/projects` stores a project request in MariaDB and creates a Kubernetes Namespace.
+- `GET /api/projects` returns project requests ordered by newest first.
+- `GET /api/projects/{id}` returns one project request by database id.
+- The current Kubernetes scope is Namespace creation only. Deployment, Service, Ingress, and ResourceQuota are planned for later phases.
+
+### API Test Example
+
+PowerShell:
+
+```powershell
+$body = @{
+  service_name = "demo-api"
+  environment = "staging"
+  image = "nginx:latest"
+  replicas = 1
+  cpu_request = "100m"
+  cpu_limit = "500m"
+  memory_request = "128Mi"
+  memory_limit = "512Mi"
+  expose_external = $false
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/projects" `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+List projects:
+
+```powershell
+Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8000/api/projects"
+```
+
+Get one project:
+
+```powershell
+Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8000/api/projects/1"
+```
+
+### Kubernetes Verification
+
+```bash
+kubectl get namespaces
+kubectl get namespace demo-api-staging --show-labels
+```
+
+Expected labels include:
+
+- `app.kubernetes.io/managed-by=self-service-portal`
+- `app.kubernetes.io/name=demo-api`
+- `platform.io/environment=staging`
+- `platform.io/project-id=<projects.id>`
+
+### Database Verification
+
+```bash
+docker exec -it portal-mariadb mariadb -u portal_user -p
+USE portal_db;
+SHOW TABLES;
+SELECT id, service_name, environment, namespace, status, error_message FROM projects;
+```
