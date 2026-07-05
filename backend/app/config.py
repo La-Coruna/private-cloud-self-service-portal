@@ -1,0 +1,34 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    app_name: str = "private-cloud-self-service-portal"
+    app_env: str = "local"
+
+    db_host: str = "127.0.0.1"
+    db_port: int = 3306
+    db_name: str = "portal_db"
+    db_user: str = "portal_user"
+    db_password: str = "portal_pass"
+
+    kube_context: str = "kind-portal-dev"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @property
+    def database_url(self) -> str:
+        return (
+            f"mysql+pymysql://{self.db_user}:{self.db_password}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
