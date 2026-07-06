@@ -141,3 +141,75 @@ USE portal_db;
 SHOW TABLES;
 SELECT id, service_name, environment, namespace, status, error_message FROM projects;
 ```
+
+## Phase 3: Deployment / Service Provisioning
+
+This phase extends project provisioning beyond Namespace creation:
+
+- `POST /api/projects` now creates Namespace, Deployment, and Service in sequence.
+- Deployment uses the requested image, replica count, CPU request/limit, and memory request/limit.
+- A ClusterIP Service is created as `{service_name}-svc` on port `80`.
+- `GET /api/projects/{project_id}/pods` returns Pod phase, Pod IP, node name, start time, container readiness, restart count, state, reason, and message.
+- Bad image deployments can be diagnosed through the Pod API. For example, an image pull failure can surface as a waiting container with `ImagePullBackOff`.
+
+### Phase 3 API Test Example
+
+PowerShell:
+
+```powershell
+$body = @{
+  service_name = "demo-web"
+  environment = "staging"
+  image = "nginx:latest"
+  replicas = 1
+  cpu_request = "100m"
+  cpu_limit = "500m"
+  memory_request = "128Mi"
+  memory_limit = "512Mi"
+  expose_external = $false
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/projects" `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+Check Kubernetes resources:
+
+```bash
+kubectl get all -n demo-web-staging
+```
+
+Check Pod status through the API:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/projects/2/pods"
+```
+
+### Bad Image Test Example
+
+Use a project request such as:
+
+```powershell
+$body = @{
+  service_name = "bad-image"
+  environment = "staging"
+  image = "nginx-not-exist-abc:latest"
+  replicas = 1
+  expose_external = $false
+} | ConvertTo-Json
+```
+
+After the Deployment is created, inspect Pods:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/projects/3/pods"
+```
+
+The project can be `RUNNING` because Kubernetes accepted the resources, while the Pod API reveals container waiting reasons such as `ImagePullBackOff`.

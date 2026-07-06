@@ -1,4 +1,4 @@
-from datetime import datetime
+﻿from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -40,3 +40,23 @@ class ProjectResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ContainerStatusResponse(BaseModel):
+    name: str
+    image: str
+    ready: bool
+    restart_count: int
+    state: str
+    reason: str | None
+    message: str | None
+
+
+class PodResponse(BaseModel):
+    name: str
+    namespace: str
+    phase: str
+    pod_ip: str | None
+    node_name: str | None
+    start_time: str | None
+    containers: list[ContainerStatusResponse]
