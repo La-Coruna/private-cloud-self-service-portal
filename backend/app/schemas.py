@@ -60,3 +60,16 @@ class PodResponse(BaseModel):
     node_name: str | None
     start_time: str | None
     containers: list[ContainerStatusResponse]
+
+
+class ProjectEventResponse(BaseModel):
+    type: str | None
+    reason: str | None
+    message: str | None
+    count: int | None
+    involved_object_kind: str | None
+    involved_object_name: str | None
+    first_timestamp: str | None
+    last_timestamp: str | None
+    event_time: str | None
+    source_component: str | None

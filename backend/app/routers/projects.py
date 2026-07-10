@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, status
+﻿from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -6,11 +6,13 @@ from app.db import get_db
 from app.k8s_client import (
     create_deployment,
     create_namespace,
+    create_resource_quota,
     create_service,
+    list_project_events,
     list_project_pods,
 )
 from app.models import Project, ProjectStatus
-from app.schemas import ProjectCreateRequest, ProjectResponse, PodResponse
+from app.schemas import ProjectCreateRequest, ProjectEventResponse, ProjectResponse, PodResponse
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -91,6 +93,15 @@ def create_project(
     if not _is_success(namespace_result):
         return _mark_failed(project, namespace_result, db)
 
+    quota_result = create_resource_quota(
+        namespace=namespace,
+        project_id=project.id,
+        service_name=request.service_name,
+        environment=request.environment,
+    )
+    if not _is_success(quota_result):
+        return _mark_failed(project, quota_result, db)
+
     deployment_result = create_deployment(
         namespace=namespace,
         project_id=project.id,
@@ -147,6 +158,31 @@ def get_project_pods(
             detail=str(exc),
         ) from exc
 
+@router.get("/{project_id}/events", response_model=list[ProjectEventResponse])
+def get_project_events(
+    project_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+
+    try:
+        return list_project_events(
+            namespace=project.namespace,
+            project_id=project.id,
+            service_name=project.service_name,
+            limit=limit,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        ) from exc
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 def get_project(

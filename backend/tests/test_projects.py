@@ -1,4 +1,5 @@
-﻿import unittest
+﻿from datetime import datetime, timezone
+import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
@@ -13,13 +14,16 @@ from app.k8s_client import (
     build_selector_labels,
     create_deployment,
     create_namespace,
+    create_resource_quota,
     create_service,
+    list_project_events,
     list_project_pods,
 )
 from app.models import Project, ProjectStatus
 from app.routers.projects import (
     create_project,
     get_project,
+    get_project_events,
     get_project_pods,
     list_projects,
 )
@@ -72,10 +76,12 @@ class ProjectApiTests(unittest.TestCase):
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
     @patch("app.routers.projects.create_namespace")
     def test_create_project_persists_request_and_marks_running(
         self,
         mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
         mock_create_deployment: MagicMock,
         mock_create_service: MagicMock,
     ) -> None:
@@ -84,6 +90,14 @@ class ProjectApiTests(unittest.TestCase):
         def namespace_result(*args):
             call_order.append("namespace")
             return {"status": "created", "namespace": "demo-api-staging"}
+
+        def quota_result(*args, **kwargs):
+            call_order.append("resourcequota")
+            return {
+                "status": "created",
+                "resource": "resourcequota",
+                "name": "portal-resource-quota",
+            }
 
         def deployment_result(*args, **kwargs):
             call_order.append("deployment")
@@ -102,6 +116,7 @@ class ProjectApiTests(unittest.TestCase):
             }
 
         mock_create_namespace.side_effect = namespace_result
+        mock_create_resource_quota.side_effect = quota_result
         mock_create_deployment.side_effect = deployment_result
         mock_create_service.side_effect = service_result
 
@@ -119,12 +134,18 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(project.namespace, "demo-api-staging")
         self.assertEqual(project.status, ProjectStatus.RUNNING)
         self.assertIsNone(project.error_message)
-        self.assertEqual(call_order, ["namespace", "deployment", "service"])
+        self.assertEqual(call_order, ["namespace", "resourcequota", "deployment", "service"])
         mock_create_namespace.assert_called_once_with(
             "demo-api-staging",
             project.id,
             "demo-api",
             "staging",
+        )
+        mock_create_resource_quota.assert_called_once_with(
+            namespace="demo-api-staging",
+            project_id=project.id,
+            service_name="demo-api",
+            environment="staging",
         )
         mock_create_deployment.assert_called_once_with(
             namespace="demo-api-staging",
@@ -152,10 +173,12 @@ class ProjectApiTests(unittest.TestCase):
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
     @patch("app.routers.projects.create_namespace")
     def test_create_project_marks_failed_when_namespace_creation_fails(
         self,
         mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
         mock_create_deployment: MagicMock,
         mock_create_service: MagicMock,
     ) -> None:
@@ -177,21 +200,67 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(project.status, ProjectStatus.FAILED)
         self.assertIn("forbidden", project.error_message)
         self.assertIn("policy denied", project.error_message)
+        mock_create_resource_quota.assert_not_called()
         mock_create_deployment.assert_not_called()
         mock_create_service.assert_not_called()
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
     @patch("app.routers.projects.create_namespace")
-    def test_create_project_marks_failed_when_deployment_creation_fails(
+    def test_create_project_marks_failed_when_resource_quota_creation_fails(
         self,
         mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
         mock_create_deployment: MagicMock,
         mock_create_service: MagicMock,
     ) -> None:
         mock_create_namespace.return_value = {
             "status": "created",
             "namespace": "demo-api-dev",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "error",
+            "resource": "resourcequota",
+            "message": "quota denied",
+            "detail": "exceeded namespace policy",
+        }
+
+        project = create_project(
+            request=ProjectCreateRequest(
+                service_name="demo-api",
+                environment="dev",
+                image="nginx:latest",
+            ),
+            db=self.db,
+        )
+
+        self.assertEqual(project.status, ProjectStatus.FAILED)
+        self.assertIn("resourcequota", project.error_message)
+        self.assertIn("quota denied", project.error_message)
+        self.assertIn("exceeded namespace policy", project.error_message)
+        mock_create_deployment.assert_not_called()
+        mock_create_service.assert_not_called()
+
+    @patch("app.routers.projects.create_service")
+    @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
+    @patch("app.routers.projects.create_namespace")
+    def test_create_project_marks_failed_when_deployment_creation_fails(
+        self,
+        mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
+        mock_create_deployment: MagicMock,
+        mock_create_service: MagicMock,
+    ) -> None:
+        mock_create_namespace.return_value = {
+            "status": "created",
+            "namespace": "demo-api-dev",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "created",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
         }
         mock_create_deployment.return_value = {
             "status": "error",
@@ -217,16 +286,23 @@ class ProjectApiTests(unittest.TestCase):
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
     @patch("app.routers.projects.create_namespace")
     def test_create_project_marks_failed_when_service_creation_fails(
         self,
         mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
         mock_create_deployment: MagicMock,
         mock_create_service: MagicMock,
     ) -> None:
         mock_create_namespace.return_value = {
             "status": "created",
             "namespace": "demo-api-prod",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "created",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
         }
         mock_create_deployment.return_value = {
             "status": "created",
@@ -256,16 +332,23 @@ class ProjectApiTests(unittest.TestCase):
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
     @patch("app.routers.projects.create_namespace")
     def test_create_project_rejects_duplicate_namespace(
         self,
         mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
         mock_create_deployment: MagicMock,
         mock_create_service: MagicMock,
     ) -> None:
         mock_create_namespace.return_value = {
             "status": "created",
             "namespace": "demo-api-dev",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "created",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
         }
         mock_create_deployment.return_value = {
             "status": "created",
@@ -295,16 +378,23 @@ class ProjectApiTests(unittest.TestCase):
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
     @patch("app.routers.projects.create_namespace")
     def test_list_and_get_project_return_saved_projects(
         self,
         mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
         mock_create_deployment: MagicMock,
         mock_create_service: MagicMock,
     ) -> None:
         mock_create_namespace.return_value = {
             "status": "already_exists",
             "namespace": "demo-api-prod",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "already_exists",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
         }
         mock_create_deployment.return_value = {
             "status": "already_exists",
@@ -427,6 +517,88 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(exc.exception.detail, "pods unavailable")
 
 
+    def test_get_project_events_returns_404_for_missing_project(self) -> None:
+        with self.assertRaises(HTTPException) as exc:
+            get_project_events(project_id=999, limit=50, db=self.db)
+
+        self.assertEqual(exc.exception.status_code, 404)
+        self.assertEqual(exc.exception.detail, "Project not found: 999")
+
+    @patch("app.routers.projects.list_project_events")
+    def test_get_project_events_returns_kubernetes_events(
+        self,
+        mock_list_project_events: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="demo-api",
+            environment="staging",
+            image="nginx-not-exist-xyz:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="demo-api-staging",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        mock_list_project_events.return_value = [
+            {
+                "type": "Warning",
+                "reason": "Failed",
+                "message": "Failed to pull image",
+                "count": 2,
+                "involved_object_kind": "Pod",
+                "involved_object_name": "demo-api-abc",
+                "first_timestamp": "2026-07-05T07:00:00+00:00",
+                "last_timestamp": "2026-07-05T07:01:00+00:00",
+                "event_time": None,
+                "source_component": "kubelet",
+            }
+        ]
+
+        events = get_project_events(project_id=project.id, limit=20, db=self.db)
+
+        self.assertEqual(events, mock_list_project_events.return_value)
+        mock_list_project_events.assert_called_once_with(
+            namespace="demo-api-staging",
+            project_id=project.id,
+            service_name="demo-api",
+            limit=20,
+        )
+
+    @patch("app.routers.projects.list_project_events")
+    def test_get_project_events_translates_kubernetes_errors(
+        self,
+        mock_list_project_events: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="demo-api",
+            environment="dev",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="demo-api-dev",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        mock_list_project_events.side_effect = RuntimeError("events unavailable")
+
+        with self.assertRaises(HTTPException) as exc:
+            get_project_events(project_id=project.id, limit=50, db=self.db)
+
+        self.assertEqual(exc.exception.status_code, 500)
+        self.assertEqual(exc.exception.detail, "events unavailable")
+
 class KubernetesNamespaceTests(unittest.TestCase):
     def test_build_selector_labels_includes_service_name_and_project_id(self) -> None:
         self.assertEqual(
@@ -475,6 +647,112 @@ class KubernetesNamespaceTests(unittest.TestCase):
         result = create_namespace("demo-api-dev", 3, "demo-api", "dev")
 
         self.assertEqual(result, {"status": "already_exists", "namespace": "demo-api-dev"})
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_create_resource_quota_sends_default_namespace_limits(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+
+        result = create_resource_quota(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+            environment="staging",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "created",
+                "resource": "resourcequota",
+                "name": "portal-resource-quota",
+            },
+        )
+        mock_load_kube_config.assert_called_once()
+        api.create_namespaced_resource_quota.assert_called_once()
+        self.assertEqual(
+            api.create_namespaced_resource_quota.call_args.kwargs["namespace"],
+            "demo-api-staging",
+        )
+        quota = api.create_namespaced_resource_quota.call_args.kwargs["body"]
+        self.assertEqual(quota.metadata.name, "portal-resource-quota")
+        self.assertEqual(quota.metadata.namespace, "demo-api-staging")
+        self.assertEqual(
+            quota.metadata.labels,
+            {
+                "app.kubernetes.io/managed-by": "self-service-portal",
+                "app.kubernetes.io/name": "demo-api",
+                "platform.io/environment": "staging",
+                "platform.io/project-id": "7",
+            },
+        )
+        self.assertEqual(
+            quota.spec.hard,
+            {
+                "requests.cpu": "4",
+                "requests.memory": "4Gi",
+                "limits.cpu": "8",
+                "limits.memory": "8Gi",
+                "pods": "10",
+            },
+        )
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_create_resource_quota_reports_already_exists_for_conflict(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        api.create_namespaced_resource_quota.side_effect = ApiException(
+            status=409,
+            reason="Conflict",
+        )
+
+        result = create_resource_quota(
+            namespace="demo-api-dev",
+            project_id=3,
+            service_name="demo-api",
+            environment="dev",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "already_exists",
+                "resource": "resourcequota",
+                "name": "portal-resource-quota",
+            },
+        )
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_create_resource_quota_returns_error_for_kubernetes_api_failure(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        api.create_namespaced_resource_quota.side_effect = ApiException(
+            status=403,
+            reason="Forbidden",
+        )
+
+        result = create_resource_quota(
+            namespace="demo-api-prod",
+            project_id=4,
+            service_name="demo-api",
+            environment="prod",
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["resource"], "resourcequota")
+        self.assertEqual(result["message"], "Forbidden")
 
     @patch("app.k8s_client.client.AppsV1Api")
     @patch("app.k8s_client.load_kube_config")
@@ -611,6 +889,174 @@ class KubernetesNamespaceTests(unittest.TestCase):
         self.assertEqual(pods[0]["containers"][1]["state"], "waiting")
         self.assertEqual(pods[0]["containers"][1]["reason"], "ImagePullBackOff")
 
+    def _event(
+        self,
+        *,
+        name: str,
+        kind: str = "Pod",
+        reason: str = "Scheduled",
+        last_timestamp: datetime | None = None,
+        event_time: datetime | None = None,
+        creation_timestamp: datetime | None = None,
+        first_timestamp: datetime | None = None,
+    ) -> MagicMock:
+        event = MagicMock()
+        event.type = "Normal"
+        event.reason = reason
+        event.message = f"{reason} message"
+        event.count = 1
+        event.first_timestamp = first_timestamp
+        event.last_timestamp = last_timestamp
+        event.event_time = event_time
+        event.involved_object.kind = kind
+        event.involved_object.name = name
+        event.source.component = "kubelet"
+        event.metadata.creation_timestamp = creation_timestamp
+        return event
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_list_project_events_filters_unrelated_events(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        pod = MagicMock()
+        pod.metadata.name = "demo-api-abc"
+        api.list_namespaced_pod.return_value.items = [pod]
+        api.list_namespaced_event.return_value.items = [
+            self._event(name="demo-api-abc", reason="Scheduled"),
+            self._event(name="other-api-abc", reason="Failed"),
+        ]
+
+        events = list_project_events(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+        )
+
+        api.list_namespaced_pod.assert_called_once_with(
+            namespace="demo-api-staging",
+            label_selector="platform.io/project-id=7",
+        )
+        self.assertEqual([event["reason"] for event in events], ["Scheduled"])
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_list_project_events_includes_managed_object_names_and_prefixes(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        pod = MagicMock()
+        pod.metadata.name = "demo-api-pod"
+        api.list_namespaced_pod.return_value.items = [pod]
+        api.list_namespaced_event.return_value.items = [
+            self._event(name="demo-api", kind="Deployment", reason="ScalingReplicaSet"),
+            self._event(name="demo-api-svc", kind="Service", reason="Created"),
+            self._event(name="demo-api-abc123", kind="ReplicaSet", reason="SuccessfulCreate"),
+        ]
+
+        events = list_project_events(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+        )
+
+        self.assertEqual(
+            [event["involved_object_name"] for event in events],
+            ["demo-api", "demo-api-svc", "demo-api-abc123"],
+        )
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_list_project_events_sorts_latest_first_and_applies_limit(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        api.list_namespaced_pod.return_value.items = []
+        api.list_namespaced_event.return_value.items = [
+            self._event(
+                name="demo-api",
+                reason="old",
+                last_timestamp=datetime(2026, 7, 5, 7, 0, tzinfo=timezone.utc),
+            ),
+            self._event(
+                name="demo-api",
+                reason="newest",
+                event_time=datetime(2026, 7, 5, 7, 2, tzinfo=timezone.utc),
+            ),
+            self._event(
+                name="demo-api",
+                reason="middle",
+                creation_timestamp=datetime(2026, 7, 5, 7, 1, tzinfo=timezone.utc),
+            ),
+        ]
+
+        events = list_project_events(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+            limit=2,
+        )
+
+        self.assertEqual([event["reason"] for event in events], ["newest", "middle"])
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_list_project_events_formats_timestamps_as_iso_strings(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        api.list_namespaced_pod.return_value.items = []
+        api.list_namespaced_event.return_value.items = [
+            self._event(
+                name="demo-api",
+                reason="Failed",
+                first_timestamp=datetime(2026, 7, 5, 7, 0, tzinfo=timezone.utc),
+                last_timestamp=datetime(2026, 7, 5, 7, 1, tzinfo=timezone.utc),
+                event_time=datetime(2026, 7, 5, 7, 2, tzinfo=timezone.utc),
+            )
+        ]
+
+        event = list_project_events(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+        )[0]
+
+        self.assertEqual(event["first_timestamp"], "2026-07-05T07:00:00+00:00")
+        self.assertEqual(event["last_timestamp"], "2026-07-05T07:01:00+00:00")
+        self.assertEqual(event["event_time"], "2026-07-05T07:02:00+00:00")
+        self.assertEqual(event["source_component"], "kubelet")
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_list_project_events_converts_kubernetes_api_errors(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        api.list_namespaced_pod.side_effect = ApiException(
+            status=403,
+            reason="Forbidden",
+        )
+
+        with self.assertRaises(RuntimeError) as exc:
+            list_project_events(
+                namespace="demo-api-staging",
+                project_id=7,
+                service_name="demo-api",
+            )
+
+        self.assertEqual(str(exc.exception), "Kubernetes API error: Forbidden")
 
 if __name__ == "__main__":
     unittest.main()

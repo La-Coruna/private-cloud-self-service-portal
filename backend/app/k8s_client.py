@@ -6,6 +6,14 @@ from app.config import get_settings
 
 
 MANAGED_BY = "self-service-portal"
+RESOURCE_QUOTA_NAME = "portal-resource-quota"
+DEFAULT_RESOURCE_QUOTA_HARD = {
+    "requests.cpu": "4",
+    "requests.memory": "4Gi",
+    "limits.cpu": "8",
+    "limits.memory": "8Gi",
+    "pods": "10",
+}
 
 
 def load_kube_config() -> None:
@@ -82,6 +90,46 @@ def create_namespace(
         }
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+
+
+def create_resource_quota(
+    *,
+    namespace: str,
+    project_id: int,
+    service_name: str,
+    environment: str,
+) -> dict:
+    try:
+        load_kube_config()
+        resource_quota = client.V1ResourceQuota(
+            api_version="v1",
+            kind="ResourceQuota",
+            metadata=client.V1ObjectMeta(
+                name=RESOURCE_QUOTA_NAME,
+                namespace=namespace,
+                labels=build_common_labels(project_id, service_name, environment),
+            ),
+            spec=client.V1ResourceQuotaSpec(hard=DEFAULT_RESOURCE_QUOTA_HARD),
+        )
+        client.CoreV1Api().create_namespaced_resource_quota(
+            namespace=namespace,
+            body=resource_quota,
+        )
+        return {
+            "status": "created",
+            "resource": "resourcequota",
+            "name": RESOURCE_QUOTA_NAME,
+        }
+    except ApiException as exc:
+        if exc.status == 409:
+            return {
+                "status": "already_exists",
+                "resource": "resourcequota",
+                "name": RESOURCE_QUOTA_NAME,
+            }
+        return _api_error_result("resourcequota", exc)
+    except Exception as exc:
+        return {"status": "error", "resource": "resourcequota", "message": str(exc)}
 
 
 def create_deployment(
@@ -200,6 +248,49 @@ def create_service(
         return {"status": "error", "resource": "service", "message": str(exc)}
 
 
+def _to_iso(value) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _event_sort_timestamp(event) -> float:
+    metadata = getattr(event, "metadata", None)
+    for value in (
+        getattr(event, "last_timestamp", None),
+        getattr(event, "event_time", None),
+        getattr(metadata, "creation_timestamp", None),
+        getattr(event, "first_timestamp", None),
+    ):
+        if value is not None:
+            return value.timestamp()
+    return float("-inf")
+
+
+def _is_project_event(event, managed_object_names: set[str], service_name: str) -> bool:
+    involved_object = getattr(event, "involved_object", None)
+    object_name = getattr(involved_object, "name", None)
+    if object_name is None:
+        return False
+    return object_name in managed_object_names or object_name.startswith(f"{service_name}-")
+
+
+def _format_event(event) -> dict:
+    involved_object = getattr(event, "involved_object", None)
+    source = getattr(event, "source", None)
+    return {
+        "type": getattr(event, "type", None),
+        "reason": getattr(event, "reason", None),
+        "message": getattr(event, "message", None),
+        "count": getattr(event, "count", None),
+        "involved_object_kind": getattr(involved_object, "kind", None),
+        "involved_object_name": getattr(involved_object, "name", None),
+        "first_timestamp": _to_iso(getattr(event, "first_timestamp", None)),
+        "last_timestamp": _to_iso(getattr(event, "last_timestamp", None)),
+        "event_time": _to_iso(getattr(event, "event_time", None)),
+        "source_component": getattr(source, "component", None),
+    }
+
 def _container_state(container_status) -> tuple[str, str | None, str | None]:
     state = container_status.state
     if getattr(state, "running", None) is not None:
@@ -254,5 +345,39 @@ def list_project_pods(namespace: str, project_id: int) -> list[dict]:
         return results
     except ApiException as exc:
         raise RuntimeError(f"Failed to list pods: {exc.reason}") from exc
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def list_project_events(
+    namespace: str,
+    project_id: int,
+    service_name: str,
+    limit: int = 50,
+) -> list[dict]:
+    try:
+        load_kube_config()
+        core_v1 = client.CoreV1Api()
+        pods = core_v1.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"platform.io/project-id={project_id}",
+        )
+        managed_object_names = {service_name, f"{service_name}-svc"}
+        managed_object_names.update(
+            pod.metadata.name
+            for pod in pods.items
+            if getattr(pod.metadata, "name", None) is not None
+        )
+
+        events = core_v1.list_namespaced_event(namespace=namespace)
+        project_events = [
+            event
+            for event in events.items
+            if _is_project_event(event, managed_object_names, service_name)
+        ]
+        project_events.sort(key=_event_sort_timestamp, reverse=True)
+        return [_format_event(event) for event in project_events[:limit]]
+    except ApiException as exc:
+        raise RuntimeError(f"Kubernetes API error: {exc.reason}") from exc
     except Exception as exc:
         raise RuntimeError(str(exc)) from exc

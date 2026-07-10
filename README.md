@@ -213,3 +213,60 @@ Invoke-RestMethod `
 ```
 
 The project can be `RUNNING` because Kubernetes accepted the resources, while the Pod API reveals container waiting reasons such as `ImagePullBackOff`.
+
+## Phase 4: Kubernetes Event 조회 API
+
+This phase adds project-scoped Kubernetes Event lookup for operational troubleshooting:
+
+- `GET /api/projects/{project_id}/events` API added.
+- Kubernetes Events are listed from the project's Namespace.
+- Namespace-wide Events are filtered down to resources related to the project.
+- Event `type`, `reason`, `message`, and `count` are returned.
+- `involved_object_kind` and `involved_object_name` are returned.
+- `first_timestamp`, `last_timestamp`, and `event_time` are returned as ISO strings when present.
+- `source_component` is returned when Kubernetes provides it.
+- Bad image deployments can now show related Failed, BackOff, ErrImagePull, and ImagePullBackOff event history.
+
+The Pod status API shows the current container state. The Event lookup API shows the history Kubernetes recorded while scheduling resources, pulling images, and creating or starting containers. This makes issues such as ImagePullBackOff easier to analyze in more detail.
+
+### Phase 4 API Test Example
+
+PowerShell Event lookup:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/projects/3/events"
+```
+
+Limit the number of returned Events:
+
+```powershell
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "http://127.0.0.1:8000/api/projects/3/events?limit=20"
+```
+
+Compare with kubectl:
+
+```bash
+kubectl get events -n bad-image-staging --sort-by=.lastTimestamp
+```
+
+Bad image project request example:
+
+```powershell
+$body = @{
+  service_name = "event-fail"
+  environment = "staging"
+  image = "nginx-not-exist-xyz:latest"
+  replicas = 1
+  expose_external = $false
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/projects" `
+  -ContentType "application/json" `
+  -Body $body
+```
