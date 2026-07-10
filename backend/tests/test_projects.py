@@ -16,12 +16,18 @@ from app.k8s_client import (
     create_namespace,
     create_resource_quota,
     create_service,
+    delete_deployment,
+    delete_namespace,
+    delete_project_resources,
+    delete_resource_quota,
+    delete_service,
     list_project_events,
     list_project_pods,
 )
 from app.models import Project, ProjectStatus
 from app.routers.projects import (
     create_project,
+    delete_project,
     get_project,
     get_project_events,
     get_project_pods,
@@ -599,6 +605,130 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 500)
         self.assertEqual(exc.exception.detail, "events unavailable")
 
+    @patch("app.routers.projects.delete_project_resources")
+    def test_delete_project_marks_deleted_after_kubernetes_resources_are_removed(
+        self,
+        mock_delete_project_resources: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="delete-demo",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="delete-demo-staging",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+
+        def delete_results(*, namespace: str, service_name: str) -> list[dict]:
+            deleting_project = self.db.get(Project, project.id)
+            self.assertEqual(deleting_project.status, ProjectStatus.DELETING)
+            self.assertIsNone(deleting_project.error_message)
+            self.assertEqual(namespace, "delete-demo-staging")
+            self.assertEqual(service_name, "delete-demo")
+            return [
+                {"status": "deleted", "resource": "service", "name": "delete-demo-svc"},
+                {"status": "deleted", "resource": "deployment", "name": "delete-demo"},
+                {"status": "deleted", "resource": "resourcequota", "name": "portal-resource-quota"},
+                {"status": "deleted", "resource": "namespace", "name": "delete-demo-staging"},
+            ]
+
+        mock_delete_project_resources.side_effect = delete_results
+
+        deleted = delete_project(project_id=project.id, db=self.db)
+
+        self.assertEqual(deleted.status, ProjectStatus.DELETED)
+        self.assertIsNone(deleted.error_message)
+        mock_delete_project_resources.assert_called_once_with(
+            namespace="delete-demo-staging",
+            service_name="delete-demo",
+        )
+        with self.SessionLocal() as db:
+            saved_project = db.get(Project, project.id)
+            self.assertEqual(saved_project.status, ProjectStatus.DELETED)
+            self.assertIsNone(saved_project.error_message)
+
+    @patch("app.routers.projects.delete_project_resources")
+    def test_delete_project_returns_deleted_project_without_redeleting(
+        self,
+        mock_delete_project_resources: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="delete-demo",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="delete-demo-staging",
+            status=ProjectStatus.DELETED,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+
+        deleted = delete_project(project_id=project.id, db=self.db)
+
+        self.assertEqual(deleted.status, ProjectStatus.DELETED)
+        mock_delete_project_resources.assert_not_called()
+
+    @patch("app.routers.projects.delete_project_resources")
+    def test_delete_project_marks_failed_when_any_resource_delete_fails(
+        self,
+        mock_delete_project_resources: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="delete-demo",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="delete-demo-staging",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        mock_delete_project_resources.return_value = [
+            {"status": "deleted", "resource": "service", "name": "delete-demo-svc"},
+            {
+                "status": "error",
+                "resource": "deployment",
+                "name": "delete-demo",
+                "message": "Forbidden",
+                "detail": "policy denied",
+            },
+            {"status": "not_found", "resource": "resourcequota", "name": "portal-resource-quota"},
+        ]
+
+        failed = delete_project(project_id=project.id, db=self.db)
+
+        self.assertEqual(failed.status, ProjectStatus.FAILED)
+        self.assertIn("deployment/delete-demo", failed.error_message)
+        self.assertIn("Forbidden", failed.error_message)
+        self.assertIn("policy denied", failed.error_message)
+
+    def test_delete_project_returns_404_for_missing_project(self) -> None:
+        with self.assertRaises(HTTPException) as exc:
+            delete_project(project_id=999, db=self.db)
+
+        self.assertEqual(exc.exception.status_code, 404)
+        self.assertEqual(exc.exception.detail, "Project not found: 999")
+
 class KubernetesNamespaceTests(unittest.TestCase):
     def test_build_selector_labels_includes_service_name_and_project_id(self) -> None:
         self.assertEqual(
@@ -836,6 +966,149 @@ class KubernetesNamespaceTests(unittest.TestCase):
         self.assertEqual(service.spec.ports[0].name, "http")
         self.assertEqual(service.spec.ports[0].port, 80)
         self.assertEqual(service.spec.ports[0].target_port, 80)
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_service_removes_cluster_ip_service(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+
+        result = delete_service(namespace="delete-demo-staging", service_name="delete-demo")
+
+        api.delete_namespaced_service.assert_called_once_with(
+            name="delete-demo-svc",
+            namespace="delete-demo-staging",
+        )
+        self.assertEqual(
+            result,
+            {"status": "deleted", "resource": "service", "name": "delete-demo-svc"},
+        )
+
+    @patch("app.k8s_client.client.AppsV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_deployment_removes_workload(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_apps_v1_api: MagicMock,
+    ) -> None:
+        api = mock_apps_v1_api.return_value
+
+        result = delete_deployment(namespace="delete-demo-staging", service_name="delete-demo")
+
+        api.delete_namespaced_deployment.assert_called_once_with(
+            name="delete-demo",
+            namespace="delete-demo-staging",
+        )
+        self.assertEqual(
+            result,
+            {"status": "deleted", "resource": "deployment", "name": "delete-demo"},
+        )
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_resource_quota_removes_portal_quota(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+
+        result = delete_resource_quota(namespace="delete-demo-staging")
+
+        api.delete_namespaced_resource_quota.assert_called_once_with(
+            name="portal-resource-quota",
+            namespace="delete-demo-staging",
+        )
+        self.assertEqual(
+            result,
+            {"status": "deleted", "resource": "resourcequota", "name": "portal-resource-quota"},
+        )
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_namespace_removes_project_namespace(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+
+        result = delete_namespace(namespace="delete-demo-staging")
+
+        api.delete_namespace.assert_called_once_with(name="delete-demo-staging")
+        self.assertEqual(
+            result,
+            {"status": "deleted", "resource": "namespace", "name": "delete-demo-staging"},
+        )
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_service_reports_not_found_as_already_absent(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_core_v1_api: MagicMock,
+    ) -> None:
+        api = mock_core_v1_api.return_value
+        api.delete_namespaced_service.side_effect = ApiException(
+            status=404,
+            reason="Not Found",
+        )
+
+        result = delete_service(namespace="delete-demo-staging", service_name="delete-demo")
+
+        self.assertEqual(
+            result,
+            {"status": "not_found", "resource": "service", "name": "delete-demo-svc"},
+        )
+
+    @patch("app.k8s_client.delete_namespace")
+    @patch("app.k8s_client.delete_resource_quota")
+    @patch("app.k8s_client.delete_deployment")
+    @patch("app.k8s_client.delete_service")
+    def test_delete_project_resources_deletes_in_expected_order(
+        self,
+        mock_delete_service: MagicMock,
+        mock_delete_deployment: MagicMock,
+        mock_delete_resource_quota: MagicMock,
+        mock_delete_namespace: MagicMock,
+    ) -> None:
+        call_order = []
+        mock_delete_service.side_effect = lambda **kwargs: call_order.append("service") or {
+            "status": "deleted",
+            "resource": "service",
+            "name": "delete-demo-svc",
+        }
+        mock_delete_deployment.side_effect = lambda **kwargs: call_order.append("deployment") or {
+            "status": "deleted",
+            "resource": "deployment",
+            "name": "delete-demo",
+        }
+        mock_delete_resource_quota.side_effect = lambda **kwargs: call_order.append("resourcequota") or {
+            "status": "deleted",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
+        }
+        mock_delete_namespace.side_effect = lambda **kwargs: call_order.append("namespace") or {
+            "status": "deleted",
+            "resource": "namespace",
+            "name": "delete-demo-staging",
+        }
+
+        results = delete_project_resources(
+            namespace="delete-demo-staging",
+            service_name="delete-demo",
+        )
+
+        self.assertEqual(call_order, ["service", "deployment", "resourcequota", "namespace"])
+        self.assertEqual([result["resource"] for result in results], [
+            "service",
+            "deployment",
+            "resourcequota",
+            "namespace",
+        ])
 
     @patch("app.k8s_client.client.CoreV1Api")
     @patch("app.k8s_client.load_kube_config")

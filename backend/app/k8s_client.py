@@ -64,6 +64,45 @@ def _api_error_result(resource: str, exc: ApiException) -> dict:
     }
 
 
+def _is_not_found(exc: ApiException) -> bool:
+    return exc.status == 404
+
+
+def _delete_success(resource: str, name: str) -> dict:
+    return {
+        "status": "deleted",
+        "resource": resource,
+        "name": name,
+    }
+
+
+def _delete_already_absent(resource: str, name: str) -> dict:
+    return {
+        "status": "not_found",
+        "resource": resource,
+        "name": name,
+    }
+
+
+def _delete_api_error_result(resource: str, name: str, exc: ApiException) -> dict:
+    return {
+        "status": "error",
+        "resource": resource,
+        "name": name,
+        "message": exc.reason,
+        "detail": exc.body,
+    }
+
+
+def _delete_error_result(resource: str, name: str, exc: Exception) -> dict:
+    return {
+        "status": "error",
+        "resource": resource,
+        "name": name,
+        "message": str(exc),
+    }
+
+
 def create_namespace(
     namespace: str,
     project_id: int,
@@ -246,6 +285,77 @@ def create_service(
         return _api_error_result("service", exc)
     except Exception as exc:
         return {"status": "error", "resource": "service", "message": str(exc)}
+
+
+def delete_service(namespace: str, service_name: str) -> dict:
+    service_resource_name = f"{service_name}-svc"
+    try:
+        load_kube_config()
+        client.CoreV1Api().delete_namespaced_service(
+            name=service_resource_name,
+            namespace=namespace,
+        )
+        return _delete_success("service", service_resource_name)
+    except ApiException as exc:
+        if _is_not_found(exc):
+            return _delete_already_absent("service", service_resource_name)
+        return _delete_api_error_result("service", service_resource_name, exc)
+    except Exception as exc:
+        return _delete_error_result("service", service_resource_name, exc)
+
+
+def delete_deployment(namespace: str, service_name: str) -> dict:
+    try:
+        load_kube_config()
+        client.AppsV1Api().delete_namespaced_deployment(
+            name=service_name,
+            namespace=namespace,
+        )
+        return _delete_success("deployment", service_name)
+    except ApiException as exc:
+        if _is_not_found(exc):
+            return _delete_already_absent("deployment", service_name)
+        return _delete_api_error_result("deployment", service_name, exc)
+    except Exception as exc:
+        return _delete_error_result("deployment", service_name, exc)
+
+
+def delete_resource_quota(namespace: str) -> dict:
+    try:
+        load_kube_config()
+        client.CoreV1Api().delete_namespaced_resource_quota(
+            name=RESOURCE_QUOTA_NAME,
+            namespace=namespace,
+        )
+        return _delete_success("resourcequota", RESOURCE_QUOTA_NAME)
+    except ApiException as exc:
+        if _is_not_found(exc):
+            return _delete_already_absent("resourcequota", RESOURCE_QUOTA_NAME)
+        return _delete_api_error_result("resourcequota", RESOURCE_QUOTA_NAME, exc)
+    except Exception as exc:
+        return _delete_error_result("resourcequota", RESOURCE_QUOTA_NAME, exc)
+
+
+def delete_namespace(namespace: str) -> dict:
+    try:
+        load_kube_config()
+        client.CoreV1Api().delete_namespace(name=namespace)
+        return _delete_success("namespace", namespace)
+    except ApiException as exc:
+        if _is_not_found(exc):
+            return _delete_already_absent("namespace", namespace)
+        return _delete_api_error_result("namespace", namespace, exc)
+    except Exception as exc:
+        return _delete_error_result("namespace", namespace, exc)
+
+
+def delete_project_resources(namespace: str, service_name: str) -> list[dict]:
+    return [
+        delete_service(namespace=namespace, service_name=service_name),
+        delete_deployment(namespace=namespace, service_name=service_name),
+        delete_resource_quota(namespace=namespace),
+        delete_namespace(namespace=namespace),
+    ]
 
 
 def _to_iso(value) -> str | None:

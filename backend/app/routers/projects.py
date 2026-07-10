@@ -8,6 +8,7 @@ from app.k8s_client import (
     create_namespace,
     create_resource_quota,
     create_service,
+    delete_project_resources,
     list_project_events,
     list_project_pods,
 )
@@ -45,6 +46,26 @@ def _mark_failed(project: Project, result: dict, db: Session) -> Project:
 
 def _is_success(result: dict) -> bool:
     return result.get("status") in SUCCESS_STATUSES
+
+def _is_delete_success(result: dict) -> bool:
+    return result.get("status") in {"deleted", "not_found"}
+
+
+def _format_delete_error_message(results: list[dict]) -> str:
+    messages = []
+    for result in results:
+        if _is_delete_success(result):
+            continue
+        resource = result.get("resource", "unknown")
+        name = result.get("name", "unknown")
+        message = result.get("message") or "Unknown Kubernetes error"
+        detail = result.get("detail")
+        if detail:
+            messages.append(f"{resource}/{name}: {message} - {detail}")
+        else:
+            messages.append(f"{resource}/{name}: {message}")
+    return " | ".join(messages)
+
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -183,6 +204,45 @@ def get_project_events(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+
+@router.delete("/{project_id}", response_model=ProjectResponse)
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+) -> Project:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+
+    if project.status == ProjectStatus.DELETED:
+        return project
+
+    project.status = ProjectStatus.DELETING
+    project.error_message = None
+    db.commit()
+    db.refresh(project)
+
+    delete_results = delete_project_resources(
+        namespace=project.namespace,
+        service_name=project.service_name,
+    )
+
+    if any(not _is_delete_success(result) for result in delete_results):
+        project.status = ProjectStatus.FAILED
+        project.error_message = _format_delete_error_message(delete_results)
+        db.commit()
+        db.refresh(project)
+        return project
+
+    project.status = ProjectStatus.DELETED
+    project.error_message = None
+    db.commit()
+    db.refresh(project)
+    return project
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 def get_project(
