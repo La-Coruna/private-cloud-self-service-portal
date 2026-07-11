@@ -36,3 +36,6 @@ logs/
 # Private work notes
 private-worklog/
 .local-notes/
+
+# Codex local execution logs
+.codex/

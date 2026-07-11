@@ -270,3 +270,28 @@ Invoke-RestMethod `
   -ContentType "application/json" `
   -Body $body
 ```
+
+## Local Ingress Browser Access
+
+Projects created with `expose_external=true` get an Ingress host like:
+
+```text
+browser-demo-staging.localtest.me
+```
+
+For browser or curl access on a local kind cluster, the cluster must be created
+with host port mappings and ingress-nginx must be installed:
+
+```powershell
+.\infra\scripts\create-kind-cluster.ps1
+.\infra\scripts\install-ingress-nginx.ps1
+```
+
+Then create an exposed project and access it through port `8080`:
+
+```powershell
+curl.exe http://browser-demo-staging.localtest.me:8080
+```
+
+Full local Ingress setup and troubleshooting steps are in
+`docs/08-local-ingress-access.md`.
