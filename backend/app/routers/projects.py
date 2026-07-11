@@ -5,7 +5,9 @@ from sqlalchemy.orm import Session
 from app.audit import create_audit_log
 from app.db import get_db
 from app.k8s_client import (
+    build_ingress_host,
     create_deployment,
+    create_ingress,
     create_namespace,
     create_resource_quota,
     create_service,
@@ -249,6 +251,43 @@ def create_project(
         message=f"Service created: {project.service_name}-svc",
     )
 
+    if request.expose_external:
+        ingress_host = build_ingress_host(request.service_name, request.environment)
+        ingress_result = create_ingress(
+            namespace=namespace,
+            project_id=project.id,
+            service_name=request.service_name,
+            environment=request.environment,
+            host=ingress_host,
+        )
+        if not _is_success(ingress_result):
+            return _mark_failed_with_audit(
+                project,
+                ingress_result,
+                db,
+                "INGRESS_CREATE_FAILED",
+            )
+
+        project.ingress_host = ingress_host
+        db.commit()
+        db.refresh(project)
+
+        _log_project_event(
+            db=db,
+            project=project,
+            action="INGRESS_CREATED",
+            status="SUCCESS",
+            message=f"Ingress created: {ingress_host}",
+        )
+    else:
+        _log_project_event(
+            db=db,
+            project=project,
+            action="INGRESS_SKIPPED",
+            status="SUCCESS",
+            message="External exposure was not requested",
+        )
+
     project.status = ProjectStatus.RUNNING
     project.error_message = None
     db.commit()
@@ -351,6 +390,7 @@ def delete_project(
     )
 
     delete_action_by_resource = {
+        "ingress": "INGRESS_DELETED",
         "service": "SERVICE_DELETED",
         "deployment": "DEPLOYMENT_DELETED",
         "resourcequota": "RESOURCE_QUOTA_DELETED",

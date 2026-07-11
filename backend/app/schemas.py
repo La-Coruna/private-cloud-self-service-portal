@@ -34,6 +34,7 @@ class ProjectResponse(BaseModel):
     memory_limit: str
     expose_external: bool
     namespace: str
+    ingress_host: str | None
     status: ProjectStatus
     error_message: str | None
     created_at: datetime

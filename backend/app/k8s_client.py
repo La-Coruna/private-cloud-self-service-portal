@@ -37,6 +37,10 @@ def build_selector_labels(project_id: int, service_name: str) -> dict[str, str]:
     }
 
 
+def build_ingress_host(service_name: str, environment: str) -> str:
+    return f"{service_name}-{environment}.localtest.me"
+
+
 def check_kubernetes_connection() -> dict:
     settings = get_settings()
 
@@ -287,6 +291,82 @@ def create_service(
         return {"status": "error", "resource": "service", "message": str(exc)}
 
 
+def create_ingress(
+    *,
+    namespace: str,
+    project_id: int,
+    service_name: str,
+    environment: str,
+    host: str,
+) -> dict:
+    ingress_name = f"{service_name}-ingress"
+    service_name_with_suffix = f"{service_name}-svc"
+    try:
+        load_kube_config()
+        ingress = client.V1Ingress(
+            api_version="networking.k8s.io/v1",
+            kind="Ingress",
+            metadata=client.V1ObjectMeta(
+                name=ingress_name,
+                namespace=namespace,
+                labels=build_common_labels(project_id, service_name, environment),
+            ),
+            spec=client.V1IngressSpec(
+                rules=[
+                    client.V1IngressRule(
+                        host=host,
+                        http=client.V1HTTPIngressRuleValue(
+                            paths=[
+                                client.V1HTTPIngressPath(
+                                    path="/",
+                                    path_type="Prefix",
+                                    backend=client.V1IngressBackend(
+                                        service=client.V1IngressServiceBackend(
+                                            name=service_name_with_suffix,
+                                            port=client.V1ServiceBackendPort(number=80),
+                                        )
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+                ]
+            ),
+        )
+        client.NetworkingV1Api().create_namespaced_ingress(
+            namespace=namespace,
+            body=ingress,
+        )
+        return {"status": "created", "resource": "ingress", "name": ingress_name}
+    except ApiException as exc:
+        if exc.status == 409:
+            return {
+                "status": "already_exists",
+                "resource": "ingress",
+                "name": ingress_name,
+            }
+        return _api_error_result("ingress", exc)
+    except Exception as exc:
+        return {"status": "error", "resource": "ingress", "message": str(exc)}
+
+
+def delete_ingress(namespace: str, service_name: str) -> dict:
+    ingress_name = f"{service_name}-ingress"
+    try:
+        load_kube_config()
+        client.NetworkingV1Api().delete_namespaced_ingress(
+            name=ingress_name,
+            namespace=namespace,
+        )
+        return _delete_success("ingress", ingress_name)
+    except ApiException as exc:
+        if _is_not_found(exc):
+            return _delete_already_absent("ingress", ingress_name)
+        return _delete_api_error_result("ingress", ingress_name, exc)
+    except Exception as exc:
+        return _delete_error_result("ingress", ingress_name, exc)
+
+
 def delete_service(namespace: str, service_name: str) -> dict:
     service_resource_name = f"{service_name}-svc"
     try:
@@ -351,6 +431,7 @@ def delete_namespace(namespace: str) -> dict:
 
 def delete_project_resources(namespace: str, service_name: str) -> list[dict]:
     return [
+        delete_ingress(namespace=namespace, service_name=service_name),
         delete_service(namespace=namespace, service_name=service_name),
         delete_deployment(namespace=namespace, service_name=service_name),
         delete_resource_quota(namespace=namespace),
@@ -472,7 +553,11 @@ def list_project_events(
             namespace=namespace,
             label_selector=f"platform.io/project-id={project_id}",
         )
-        managed_object_names = {service_name, f"{service_name}-svc"}
+        managed_object_names = {
+            service_name,
+            f"{service_name}-svc",
+            f"{service_name}-ingress",
+        }
         managed_object_names.update(
             pod.metadata.name
             for pod in pods.items

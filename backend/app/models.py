@@ -34,6 +34,7 @@ class Project(Base):
     memory_limit: Mapped[str] = mapped_column(String(30), nullable=False)
     expose_external: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     namespace: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    ingress_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[ProjectStatus] = mapped_column(
         Enum(
             ProjectStatus,

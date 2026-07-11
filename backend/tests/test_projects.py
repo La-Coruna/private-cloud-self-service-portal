@@ -12,12 +12,15 @@ from sqlalchemy.pool import StaticPool
 from app.audit import create_audit_log
 from app.db import Base
 from app.k8s_client import (
+    build_ingress_host,
     build_selector_labels,
     create_deployment,
+    create_ingress,
     create_namespace,
     create_resource_quota,
     create_service,
     delete_deployment,
+    delete_ingress,
     delete_namespace,
     delete_project_resources,
     delete_resource_quota,
@@ -116,6 +119,11 @@ class ProjectSchemaTests(unittest.TestCase):
         self.assertEqual(request.memory_limit, "512Mi")
         self.assertFalse(request.expose_external)
 
+    def test_project_response_includes_ingress_host(self) -> None:
+        from app.schemas import ProjectResponse
+
+        self.assertIn("ingress_host", ProjectResponse.model_fields)
+
 
 class ProjectApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -195,6 +203,7 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(project.service_name, "demo-api")
         self.assertEqual(project.environment, "staging")
         self.assertEqual(project.namespace, "demo-api-staging")
+        self.assertIsNone(getattr(project, "ingress_host", None))
         self.assertEqual(project.status, ProjectStatus.RUNNING)
         self.assertIsNone(project.error_message)
         self.assertEqual(call_order, ["namespace", "resourcequota", "deployment", "service"])
@@ -249,9 +258,138 @@ class ProjectApiTests(unittest.TestCase):
                     "RESOURCE_QUOTA_CREATED",
                     "DEPLOYMENT_CREATED",
                     "SERVICE_CREATED",
+                    "INGRESS_SKIPPED",
                     "PROJECT_RUNNING",
                 ],
             )
+
+    @patch("app.routers.projects.create_ingress")
+    @patch("app.routers.projects.create_service")
+    @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
+    @patch("app.routers.projects.create_namespace")
+    def test_create_project_creates_ingress_for_external_project(
+        self,
+        mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
+        mock_create_deployment: MagicMock,
+        mock_create_service: MagicMock,
+        mock_create_ingress: MagicMock,
+    ) -> None:
+        mock_create_namespace.return_value = {
+            "status": "created",
+            "namespace": "demo-api-staging",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "created",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
+        }
+        mock_create_deployment.return_value = {
+            "status": "created",
+            "resource": "deployment",
+            "name": "demo-api",
+        }
+        mock_create_service.return_value = {
+            "status": "created",
+            "resource": "service",
+            "name": "demo-api-svc",
+        }
+        mock_create_ingress.return_value = {
+            "status": "created",
+            "resource": "ingress",
+            "name": "demo-api-ingress",
+        }
+
+        project = create_project(
+            request=ProjectCreateRequest(
+                service_name="demo-api",
+                environment="staging",
+                image="nginx:latest",
+                expose_external=True,
+            ),
+            db=self.db,
+        )
+
+        self.assertEqual(project.status, ProjectStatus.RUNNING)
+        self.assertEqual(project.ingress_host, "demo-api-staging.localtest.me")
+        mock_create_ingress.assert_called_once_with(
+            namespace="demo-api-staging",
+            project_id=project.id,
+            service_name="demo-api",
+            environment="staging",
+            host="demo-api-staging.localtest.me",
+        )
+        audit_actions = [
+            log.action
+            for log in self.db.query(AuditLog)
+            .filter(AuditLog.project_id == project.id)
+            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            .all()
+        ]
+        self.assertIn("INGRESS_CREATED", audit_actions)
+        self.assertNotIn("INGRESS_SKIPPED", audit_actions)
+
+    @patch("app.routers.projects.create_ingress")
+    @patch("app.routers.projects.create_service")
+    @patch("app.routers.projects.create_deployment")
+    @patch("app.routers.projects.create_resource_quota")
+    @patch("app.routers.projects.create_namespace")
+    def test_create_project_marks_failed_when_ingress_creation_fails(
+        self,
+        mock_create_namespace: MagicMock,
+        mock_create_resource_quota: MagicMock,
+        mock_create_deployment: MagicMock,
+        mock_create_service: MagicMock,
+        mock_create_ingress: MagicMock,
+    ) -> None:
+        mock_create_namespace.return_value = {
+            "status": "created",
+            "namespace": "demo-api-staging",
+        }
+        mock_create_resource_quota.return_value = {
+            "status": "created",
+            "resource": "resourcequota",
+            "name": "portal-resource-quota",
+        }
+        mock_create_deployment.return_value = {
+            "status": "created",
+            "resource": "deployment",
+            "name": "demo-api",
+        }
+        mock_create_service.return_value = {
+            "status": "created",
+            "resource": "service",
+            "name": "demo-api-svc",
+        }
+        mock_create_ingress.return_value = {
+            "status": "error",
+            "resource": "ingress",
+            "message": "ingress denied",
+            "detail": "host policy denied",
+        }
+
+        project = create_project(
+            request=ProjectCreateRequest(
+                service_name="demo-api",
+                environment="staging",
+                image="nginx:latest",
+                expose_external=True,
+            ),
+            db=self.db,
+        )
+
+        self.assertEqual(project.status, ProjectStatus.FAILED)
+        self.assertIn("ingress", project.error_message)
+        self.assertIn("host policy denied", project.error_message)
+        audit_actions = [
+            log.action
+            for log in self.db.query(AuditLog)
+            .filter(AuditLog.project_id == project.id)
+            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            .all()
+        ]
+        self.assertEqual(audit_actions[-1], "INGRESS_CREATE_FAILED")
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
@@ -772,6 +910,7 @@ class ProjectApiTests(unittest.TestCase):
             self.assertEqual(namespace, "delete-demo-staging")
             self.assertEqual(service_name, "delete-demo")
             return [
+                {"status": "deleted", "resource": "ingress", "name": "delete-demo-ingress"},
                 {"status": "deleted", "resource": "service", "name": "delete-demo-svc"},
                 {"status": "deleted", "resource": "deployment", "name": "delete-demo"},
                 {"status": "deleted", "resource": "resourcequota", "name": "portal-resource-quota"},
@@ -803,6 +942,7 @@ class ProjectApiTests(unittest.TestCase):
                 audit_actions,
                 [
                     "PROJECT_DELETE_REQUESTED",
+                    "INGRESS_DELETED",
                     "SERVICE_DELETED",
                     "DEPLOYMENT_DELETED",
                     "RESOURCE_QUOTA_DELETED",
@@ -1123,6 +1263,104 @@ class KubernetesNamespaceTests(unittest.TestCase):
         self.assertEqual(service.spec.ports[0].port, 80)
         self.assertEqual(service.spec.ports[0].target_port, 80)
 
+    def test_build_ingress_host_uses_localtest_domain(self) -> None:
+        self.assertEqual(
+            build_ingress_host("demo-api", "staging"),
+            "demo-api-staging.localtest.me",
+        )
+
+    @patch("app.k8s_client.client.NetworkingV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_create_ingress_sends_expected_networking_spec(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_networking_v1_api: MagicMock,
+    ) -> None:
+        api = mock_networking_v1_api.return_value
+
+        result = create_ingress(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+            environment="staging",
+            host="demo-api-staging.localtest.me",
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "created", "resource": "ingress", "name": "demo-api-ingress"},
+        )
+        ingress = api.create_namespaced_ingress.call_args.kwargs["body"]
+        self.assertEqual(api.create_namespaced_ingress.call_args.kwargs["namespace"], "demo-api-staging")
+        self.assertEqual(ingress.metadata.name, "demo-api-ingress")
+        self.assertEqual(ingress.metadata.namespace, "demo-api-staging")
+        self.assertEqual(ingress.spec.rules[0].host, "demo-api-staging.localtest.me")
+        path = ingress.spec.rules[0].http.paths[0]
+        self.assertEqual(path.path, "/")
+        self.assertEqual(path.path_type, "Prefix")
+        self.assertEqual(path.backend.service.name, "demo-api-svc")
+        self.assertEqual(path.backend.service.port.number, 80)
+
+    @patch("app.k8s_client.client.NetworkingV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_create_ingress_reports_already_exists_for_conflict(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_networking_v1_api: MagicMock,
+    ) -> None:
+        api = mock_networking_v1_api.return_value
+        api.create_namespaced_ingress.side_effect = ApiException(status=409, reason="Conflict")
+
+        result = create_ingress(
+            namespace="demo-api-staging",
+            project_id=7,
+            service_name="demo-api",
+            environment="staging",
+            host="demo-api-staging.localtest.me",
+        )
+
+        self.assertEqual(
+            result,
+            {"status": "already_exists", "resource": "ingress", "name": "demo-api-ingress"},
+        )
+
+    @patch("app.k8s_client.client.NetworkingV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_ingress_removes_ingress(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_networking_v1_api: MagicMock,
+    ) -> None:
+        api = mock_networking_v1_api.return_value
+
+        result = delete_ingress(namespace="delete-demo-staging", service_name="delete-demo")
+
+        api.delete_namespaced_ingress.assert_called_once_with(
+            name="delete-demo-ingress",
+            namespace="delete-demo-staging",
+        )
+        self.assertEqual(
+            result,
+            {"status": "deleted", "resource": "ingress", "name": "delete-demo-ingress"},
+        )
+
+    @patch("app.k8s_client.client.NetworkingV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_delete_ingress_reports_not_found_as_already_absent(
+        self,
+        mock_load_kube_config: MagicMock,
+        mock_networking_v1_api: MagicMock,
+    ) -> None:
+        api = mock_networking_v1_api.return_value
+        api.delete_namespaced_ingress.side_effect = ApiException(status=404, reason="Not Found")
+
+        result = delete_ingress(namespace="delete-demo-staging", service_name="delete-demo")
+
+        self.assertEqual(
+            result,
+            {"status": "not_found", "resource": "ingress", "name": "delete-demo-ingress"},
+        )
+
     @patch("app.k8s_client.client.CoreV1Api")
     @patch("app.k8s_client.load_kube_config")
     def test_delete_service_removes_cluster_ip_service(
@@ -1224,14 +1462,21 @@ class KubernetesNamespaceTests(unittest.TestCase):
     @patch("app.k8s_client.delete_resource_quota")
     @patch("app.k8s_client.delete_deployment")
     @patch("app.k8s_client.delete_service")
+    @patch("app.k8s_client.delete_ingress")
     def test_delete_project_resources_deletes_in_expected_order(
         self,
+        mock_delete_ingress: MagicMock,
         mock_delete_service: MagicMock,
         mock_delete_deployment: MagicMock,
         mock_delete_resource_quota: MagicMock,
         mock_delete_namespace: MagicMock,
     ) -> None:
         call_order = []
+        mock_delete_ingress.side_effect = lambda **kwargs: call_order.append("ingress") or {
+            "status": "deleted",
+            "resource": "ingress",
+            "name": "delete-demo-ingress",
+        }
         mock_delete_service.side_effect = lambda **kwargs: call_order.append("service") or {
             "status": "deleted",
             "resource": "service",
@@ -1258,8 +1503,9 @@ class KubernetesNamespaceTests(unittest.TestCase):
             service_name="delete-demo",
         )
 
-        self.assertEqual(call_order, ["service", "deployment", "resourcequota", "namespace"])
+        self.assertEqual(call_order, ["ingress", "service", "deployment", "resourcequota", "namespace"])
         self.assertEqual([result["resource"] for result in results], [
+            "ingress",
             "service",
             "deployment",
             "resourcequota",
