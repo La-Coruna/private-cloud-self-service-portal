@@ -295,3 +295,55 @@ curl.exe http://browser-demo-staging.localtest.me:8080
 
 Full local Ingress setup and troubleshooting steps are in
 `docs/08-local-ingress-access.md`.
+
+## React Dashboard MVP
+
+The dashboard lives in `frontend/` and talks to the FastAPI backend through `VITE_API_BASE_URL`.
+
+### Setup
+
+```powershell
+cd frontend
+npm install
+Copy-Item .env.example .env
+```
+
+Default `.env` value:
+
+```text
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+### Run
+
+Start the backend first, then run the dashboard:
+
+```powershell
+cd frontend
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173/projects
+```
+
+The dashboard supports:
+
+- project list
+- project creation
+- project detail
+- Pod status lookup
+- Kubernetes Event lookup
+- Audit Log lookup
+- delete with confirmation
+
+### Verify
+
+```powershell
+cd frontend
+npm test
+npm run lint
+npm run build
+```
