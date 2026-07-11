@@ -8,6 +8,7 @@ import {
   getPods,
   getProject,
   getProjects,
+  syncProjectStatus,
 } from './lib/api'
 
 const request = vi.hoisted(() => vi.fn())
@@ -38,6 +39,7 @@ describe('project API client', () => {
     await getPods(3)
     await getEvents(3)
     await getAuditLogs(3)
+    await syncProjectStatus(3)
     await deleteProject(3)
 
     expect(request).toHaveBeenNthCalledWith(1, { method: 'GET', url: '/api/projects' })
@@ -50,6 +52,7 @@ describe('project API client', () => {
     expect(request).toHaveBeenNthCalledWith(4, { method: 'GET', url: '/api/projects/3/pods' })
     expect(request).toHaveBeenNthCalledWith(5, { method: 'GET', url: '/api/projects/3/events' })
     expect(request).toHaveBeenNthCalledWith(6, { method: 'GET', url: '/api/projects/3/audit-logs' })
-    expect(request).toHaveBeenNthCalledWith(7, { method: 'DELETE', url: '/api/projects/3' })
+    expect(request).toHaveBeenNthCalledWith(7, { method: 'POST', url: '/api/projects/3/sync-status' })
+    expect(request).toHaveBeenNthCalledWith(8, { method: 'DELETE', url: '/api/projects/3' })
   })
 })

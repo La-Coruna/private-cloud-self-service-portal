@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { QueryState } from '../components/QueryState'
 import { StatusBadge } from '../components/StatusBadge'
-import { deleteProject, getAuditLogs, getEvents, getPods, getProject } from '../lib/api'
+import { deleteProject, getAuditLogs, getEvents, getPods, getProject, syncProjectStatus } from '../lib/api'
 import { formatDateTime, textOrDash } from '../lib/format'
 
 export function ProjectDetailPage() {
@@ -16,6 +16,19 @@ export function ProjectDetailPage() {
   const podsQuery = useQuery({ queryKey: ['project', projectId, 'pods'], queryFn: () => getPods(projectId), enabled: Number.isFinite(projectId) })
   const eventsQuery = useQuery({ queryKey: ['project', projectId, 'events'], queryFn: () => getEvents(projectId), enabled: Number.isFinite(projectId) })
   const auditsQuery = useQuery({ queryKey: ['project', projectId, 'audit-logs'], queryFn: () => getAuditLogs(projectId), enabled: Number.isFinite(projectId) })
+
+  const syncMutation = useMutation({
+    mutationFn: () => syncProjectStatus(projectId),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+        queryClient.invalidateQueries({ queryKey: ['project', projectId] }),
+        queryClient.invalidateQueries({ queryKey: ['project', projectId, 'pods'] }),
+        queryClient.invalidateQueries({ queryKey: ['project', projectId, 'events'] }),
+        queryClient.invalidateQueries({ queryKey: ['project', projectId, 'audit-logs'] }),
+      ])
+    },
+  })
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteProject(projectId),
@@ -41,7 +54,10 @@ export function ProjectDetailPage() {
         </div>
         <div className="action-row">
           <Link className="secondary-action" to="/projects">목록</Link>
-          <button className="danger-action" type="button" onClick={confirmDelete} disabled={deleteMutation.isPending}>
+          <button className="secondary-action" type="button" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending || deleteMutation.isPending}>
+            {syncMutation.isPending ? '새로고침 중' : '상태 새로고침'}
+          </button>
+          <button className="danger-action" type="button" onClick={confirmDelete} disabled={deleteMutation.isPending || syncMutation.isPending}>
             삭제
           </button>
         </div>

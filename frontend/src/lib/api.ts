@@ -35,6 +35,10 @@ export function getAuditLogs(id: number): Promise<AuditLog[]> {
   return request<AuditLog[]>('GET', `/api/projects/${id}/audit-logs`)
 }
 
+export function syncProjectStatus(id: number): Promise<Project> {
+  return request<Project>('POST', `/api/projects/${id}/sync-status`)
+}
+
 export function deleteProject(id: number): Promise<Project> {
   return request<Project>('DELETE', `/api/projects/${id}`)
 }

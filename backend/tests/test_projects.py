@@ -37,6 +37,7 @@ from app.routers.projects import (
     get_project_events,
     get_project_pods,
     list_projects,
+    sync_project_status,
 )
 from app.schemas import ProjectCreateRequest
 
@@ -752,6 +753,136 @@ class ProjectApiTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.status_code, 500)
         self.assertEqual(exc.exception.detail, "pods unavailable")
+
+    @patch("app.routers.projects.list_project_events")
+    @patch("app.routers.projects.list_project_pods")
+    def test_sync_project_status_marks_failed_for_waiting_container_reason(
+        self,
+        mock_list_project_pods: MagicMock,
+        mock_list_project_events: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="bad-image",
+            environment="staging",
+            image="invalid/demo:missing",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="bad-image-staging",
+            status=ProjectStatus.PROVISIONING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        mock_list_project_pods.return_value = [
+            {
+                "name": "bad-image-abc",
+                "namespace": project.namespace,
+                "phase": "Pending",
+                "pod_ip": None,
+                "node_name": "kind-worker",
+                "start_time": None,
+                "containers": [
+                    {
+                        "name": "bad-image",
+                        "ready": False,
+                        "restart_count": 0,
+                        "image": "invalid/demo:missing",
+                        "state": "waiting",
+                        "reason": "ImagePullBackOff",
+                        "message": "Back-off pulling image",
+                    }
+                ],
+            }
+        ]
+        mock_list_project_events.return_value = [
+            {
+                "reason": "Failed",
+                "message": "Failed to pull image",
+                "type": "Warning",
+                "first_timestamp": None,
+                "last_timestamp": "2026-01-01T00:00:00+00:00",
+                "event_time": None,
+                "involved_object_kind": "Pod",
+                "involved_object_name": "bad-image-abc",
+            }
+        ]
+
+        synced = sync_project_status(project_id=project.id, db=self.db)
+
+        self.assertEqual(synced.status, ProjectStatus.FAILED)
+        self.assertIn("ImagePullBackOff", synced.error_message)
+        self.assertIn("Failed to pull image", synced.error_message)
+        audit_log = self.db.query(AuditLog).filter_by(project_id=project.id).one()
+        self.assertEqual(audit_log.action, "PROJECT_STATUS_SYNCED")
+        self.assertEqual(audit_log.status, "FAILED")
+        self.assertIn("PROVISIONING -> FAILED", audit_log.message)
+
+    @patch("app.routers.projects.list_project_events")
+    @patch("app.routers.projects.list_project_pods")
+    def test_sync_project_status_marks_running_when_all_containers_are_ready(
+        self,
+        mock_list_project_pods: MagicMock,
+        mock_list_project_events: MagicMock,
+    ) -> None:
+        project = Project(
+            service_name="demo-api",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="demo-api-staging",
+            status=ProjectStatus.FAILED,
+            error_message="previous error",
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        mock_list_project_pods.return_value = [
+            {
+                "name": "demo-api-abc",
+                "namespace": project.namespace,
+                "phase": "Running",
+                "pod_ip": "10.244.0.10",
+                "node_name": "kind-worker",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "containers": [
+                    {
+                        "name": "demo-api",
+                        "ready": True,
+                        "restart_count": 0,
+                        "image": "nginx:latest",
+                        "state": "running",
+                        "reason": None,
+                        "message": None,
+                    }
+                ],
+            }
+        ]
+        mock_list_project_events.return_value = []
+
+        synced = sync_project_status(project_id=project.id, db=self.db)
+
+        self.assertEqual(synced.status, ProjectStatus.RUNNING)
+        self.assertIsNone(synced.error_message)
+        audit_log = self.db.query(AuditLog).filter_by(project_id=project.id).one()
+        self.assertEqual(audit_log.action, "PROJECT_STATUS_SYNCED")
+        self.assertEqual(audit_log.status, "SUCCESS")
+        self.assertIn("FAILED -> RUNNING", audit_log.message)
+
+    def test_sync_project_status_returns_404_for_missing_project(self) -> None:
+        with self.assertRaises(HTTPException) as exc:
+            sync_project_status(project_id=999, db=self.db)
+
+        self.assertEqual(exc.exception.status_code, 404)
+        self.assertEqual(exc.exception.detail, "Project not found: 999")
 
     def test_get_project_audit_logs_returns_project_logs_in_created_order(self) -> None:
         project = Project(

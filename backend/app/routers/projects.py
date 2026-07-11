@@ -23,6 +23,16 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 SUCCESS_STATUSES = {"created", "already_exists"}
+FAILURE_WAITING_REASONS = {
+    "CrashLoopBackOff",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+    "ErrImagePull",
+    "ImagePullBackOff",
+    "InvalidImageName",
+    "RunContainerError",
+}
+FAILURE_EVENT_REASONS = {"BackOff", "Failed", "FailedCreate", "FailedMount", "FailedScheduling"}
 
 
 def build_namespace(service_name: str, environment: str) -> str:
@@ -37,6 +47,79 @@ def _format_kubernetes_error(result: dict) -> str:
     if detail:
         return f"{prefix}{message}: {detail}"
     return f"{prefix}{message}"
+
+
+def _join_status_details(*details: str | None) -> str | None:
+    useful_details = [detail for detail in details if detail]
+    return " | ".join(useful_details) if useful_details else None
+
+
+def _latest_event_summary(events: list[dict]) -> str | None:
+    if not events:
+        return None
+    event = events[0]
+    reason = event.get("reason") or "Unknown"
+    message = event.get("message")
+    if message:
+        return f"Latest event {reason}: {message}"
+    return f"Latest event {reason}"
+
+
+def _first_waiting_container_summary(pods: list[dict]) -> tuple[str | None, str | None]:
+    for pod in pods:
+        pod_name = pod.get("name") or "unknown-pod"
+        for container in pod.get("containers", []):
+            if container.get("state") != "waiting":
+                continue
+            reason = container.get("reason")
+            if not reason:
+                continue
+            container_name = container.get("name") or "unknown-container"
+            message = container.get("message")
+            summary = f"{pod_name}/{container_name} waiting: {reason}"
+            if message:
+                summary = f"{summary} - {message}"
+            return reason, summary
+    return None, None
+
+
+def _all_pods_ready(pods: list[dict]) -> bool:
+    if not pods:
+        return False
+    for pod in pods:
+        if pod.get("phase") != "Running":
+            return False
+        containers = pod.get("containers", [])
+        if not containers or any(not container.get("ready") for container in containers):
+            return False
+    return True
+
+
+def _derive_project_status_from_kubernetes(
+    pods: list[dict],
+    events: list[dict],
+) -> tuple[ProjectStatus, str | None]:
+    latest_event = _latest_event_summary(events)
+    if _all_pods_ready(pods):
+        return ProjectStatus.RUNNING, None
+
+    waiting_reason, waiting_summary = _first_waiting_container_summary(pods)
+    if waiting_reason in FAILURE_WAITING_REASONS:
+        return ProjectStatus.FAILED, _join_status_details(waiting_summary, latest_event)
+
+    failed_pod = next((pod for pod in pods if pod.get("phase") == "Failed"), None)
+    if failed_pod is not None:
+        pod_summary = f"Pod {failed_pod.get('name') or 'unknown-pod'} is Failed"
+        return ProjectStatus.FAILED, _join_status_details(pod_summary, waiting_summary, latest_event)
+
+    latest_event_reason = events[0].get("reason") if events else None
+    if latest_event_reason in FAILURE_EVENT_REASONS:
+        return ProjectStatus.FAILED, _join_status_details(waiting_summary, latest_event)
+
+    if not pods:
+        return ProjectStatus.PROVISIONING, _join_status_details("No pods found for project yet", latest_event)
+
+    return ProjectStatus.PROVISIONING, _join_status_details(waiting_summary, latest_event)
 
 
 def _mark_failed(project: Project, result: dict, db: Session) -> Project:
@@ -354,6 +437,71 @@ def get_project_events(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+
+@router.post("/{project_id}/sync-status", response_model=ProjectResponse)
+def sync_project_status(
+    project_id: int,
+    db: Session = Depends(get_db),
+) -> Project:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+
+    if project.status in {ProjectStatus.DELETING, ProjectStatus.DELETED}:
+        _log_project_event(
+            db=db,
+            project=project,
+            action="PROJECT_STATUS_SYNC_SKIPPED",
+            status="SUCCESS",
+            message=f"Status sync skipped because project is {project.status.value}",
+        )
+        return project
+
+    previous_status = project.status
+    try:
+        pods = list_project_pods(namespace=project.namespace, project_id=project.id)
+        events = list_project_events(
+            namespace=project.namespace,
+            project_id=project.id,
+            service_name=project.service_name,
+            limit=50,
+        )
+    except RuntimeError as exc:
+        project.status = ProjectStatus.FAILED
+        project.error_message = str(exc)
+        db.commit()
+        db.refresh(project)
+        _log_project_event(
+            db=db,
+            project=project,
+            action="PROJECT_STATUS_SYNC_FAILED",
+            status="FAILED",
+            message=project.error_message,
+        )
+        return project
+
+    next_status, status_detail = _derive_project_status_from_kubernetes(pods, events)
+    project.status = next_status
+    project.error_message = status_detail if next_status == ProjectStatus.FAILED else None
+    db.commit()
+    db.refresh(project)
+
+    message = f"Kubernetes status synced: {previous_status.value} -> {project.status.value}"
+    if status_detail:
+        message = f"{message} | {status_detail}"
+    _log_project_event(
+        db=db,
+        project=project,
+        action="PROJECT_STATUS_SYNCED",
+        status="FAILED" if project.status == ProjectStatus.FAILED else "SUCCESS",
+        message=message,
+    )
+
+    return project
 
 
 @router.delete("/{project_id}", response_model=ProjectResponse)
