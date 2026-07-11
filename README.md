@@ -1,345 +1,171 @@
-# Kubernetes 기반 Private Cloud Self-Service Portal
+# Private Cloud Self-Service Portal
 
-## 개요
+> A portfolio-ready Internal Developer Platform MVP built with FastAPI, React, MariaDB, and kind Kubernetes. Developers can request a project from a web dashboard, and the platform provisions Kubernetes Namespace, ResourceQuota, Deployment, Service, and optional Ingress resources automatically.
 
-개발자가 Kubernetes YAML을 직접 작성하지 않고 API를 통해 표준화된 방식으로 배포 리소스를 요청하고 상태를 확인할 수 있는 Private Cloud Self-Service Portal MVP입니다.
+## One-Line Summary
 
-## 현재 구현 범위
+A self-service private cloud portal that turns a simple project request form into managed Kubernetes resources with status visibility, audit logs, and failure diagnosis.
 
-- FastAPI 백엔드 기본 구성
-- MariaDB 로컬 개발환경
-- kind 기반 로컬 Kubernetes 클러스터 설정
-- `/health` API를 통한 DB/Kubernetes 연결 확인
+## Problem Definition
 
-## 기술 스택
+In many Kubernetes-based internal platforms, developers need to understand YAML, namespaces, quotas, services, ingress rules, and `kubectl` troubleshooting before they can deploy a small service. Platform teams also need a traceable way to answer these questions:
 
-- Backend: Python, FastAPI
-- Database: MariaDB
-- Kubernetes: kind, kubernetes Python client
-- Infra: Docker Compose
-- Future: React, TypeScript, Helm, ArgoCD
+- Who requested which service and environment?
+- Which Kubernetes resources were created?
+- Where did provisioning or deletion fail?
+- Is the DB project status still aligned with the real Pod state?
+- Can a developer see Pod/Event/Audit information without shell access?
 
-## 로컬 실행 방법
+This project solves that problem as an MVP: it exposes a simple dashboard and API while keeping the Kubernetes workflow explicit and observable.
 
-### 1. MariaDB 실행
+## Core Features
 
-```bash
+- Project request API and dashboard form.
+- Automatic Kubernetes resource provisioning:
+  - Namespace
+  - ResourceQuota
+  - Deployment
+  - ClusterIP Service
+  - optional Ingress when `expose_external=true`
+- Project list and detail pages in React.
+- Pod status lookup, including container state, waiting reason, restart count, and readiness.
+- Kubernetes Event lookup scoped to project-owned resources.
+- Audit Log timeline for create, delete, failure, and status sync steps.
+- Safe deletion order: Ingress -> Service -> Deployment -> ResourceQuota -> Namespace.
+- Live status sync through `POST /api/projects/{id}/sync-status`.
+- Local Ingress access guide for kind and ingress-nginx.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  User[Developer Browser] --> React[React TypeScript Dashboard]
+  React --> FastAPI[FastAPI Backend]
+  FastAPI --> MariaDB[(MariaDB)]
+  FastAPI --> K8s[Kubernetes API]
+  K8s --> NS[Namespace]
+  K8s --> RQ[ResourceQuota]
+  K8s --> Deploy[Deployment]
+  K8s --> Svc[Service]
+  K8s --> Ing[Ingress]
+  K8s --> Pod[Pod and Event]
+```
+
+Provisioning flow:
+
+```text
+Project Request
+  -> DB record
+  -> Namespace
+  -> ResourceQuota
+  -> Deployment
+  -> Service
+  -> Ingress optional
+  -> RUNNING
+```
+
+Deletion flow:
+
+```text
+Ingress -> Service -> Deployment -> ResourceQuota -> Namespace -> DELETED
+```
+
+Status sync flow:
+
+```text
+POST /api/projects/{id}/sync-status
+  -> list project Pods
+  -> inspect container waiting reason
+  -> inspect Kubernetes Events
+  -> update DB project.status
+  -> write Audit Log
+```
+
+## Tech Stack
+
+| Area | Stack |
+| --- | --- |
+| Backend | Python, FastAPI, SQLAlchemy, Pydantic |
+| Database | MariaDB |
+| Frontend | React, TypeScript, Vite, TanStack Query, React Router, Axios |
+| Kubernetes | kind, kubernetes Python client, ingress-nginx |
+| Infra | Docker Compose, PowerShell scripts |
+| Test | unittest, Vitest, Testing Library, oxlint |
+
+## How to Run
+
+### 1. Start MariaDB
+
+```powershell
 docker compose -f infra/docker-compose.yml up -d
 ```
 
-### 2. kind 클러스터 생성
+### 2. Create the kind cluster
 
-```bash
-kind create cluster --config infra/kind/kind-config.yaml
-```
-
-### 3. Backend 환경변수 설정
-
-```bash
-cd backend
-cp .env.example .env
-```
-
-### 4. Python 가상환경 및 패키지 설치
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Windows PowerShell에서는 다음을 사용합니다.
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 5. FastAPI 실행
-
-```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-### 6. Health Check
-
-http://127.0.0.1:8000/health
-
-## 다음 개발 계획
-
-- 프로젝트 요청 API
-- DB 모델 및 마이그레이션
-- Namespace 생성 기능
-- Deployment/Service 생성 기능
-- Pod 상태 조회 기능
-
-## Phase 2: Project Request API and Namespace Provisioning
-
-This phase adds the first self-service project request flow:
-
-- `POST /api/projects` stores a project request in MariaDB and creates a Kubernetes Namespace.
-- `GET /api/projects` returns project requests ordered by newest first.
-- `GET /api/projects/{id}` returns one project request by database id.
-- The current Kubernetes scope is Namespace creation only. Deployment, Service, Ingress, and ResourceQuota are planned for later phases.
-
-### API Test Example
-
-PowerShell:
-
-```powershell
-$body = @{
-  service_name = "demo-api"
-  environment = "staging"
-  image = "nginx:latest"
-  replicas = 1
-  cpu_request = "100m"
-  cpu_limit = "500m"
-  memory_request = "128Mi"
-  memory_limit = "512Mi"
-  expose_external = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/api/projects" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-List projects:
-
-```powershell
-Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8000/api/projects"
-```
-
-Get one project:
-
-```powershell
-Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8000/api/projects/1"
-```
-
-### Kubernetes Verification
-
-```bash
-kubectl get namespaces
-kubectl get namespace demo-api-staging --show-labels
-```
-
-Expected labels include:
-
-- `app.kubernetes.io/managed-by=self-service-portal`
-- `app.kubernetes.io/name=demo-api`
-- `platform.io/environment=staging`
-- `platform.io/project-id=<projects.id>`
-
-### Database Verification
-
-```bash
-docker exec -it portal-mariadb mariadb -u portal_user -p
-USE portal_db;
-SHOW TABLES;
-SELECT id, service_name, environment, namespace, status, error_message FROM projects;
-```
-
-## Phase 3: Deployment / Service Provisioning
-
-This phase extends project provisioning beyond Namespace creation:
-
-- `POST /api/projects` now creates Namespace, Deployment, and Service in sequence.
-- Deployment uses the requested image, replica count, CPU request/limit, and memory request/limit.
-- A ClusterIP Service is created as `{service_name}-svc` on port `80`.
-- `GET /api/projects/{project_id}/pods` returns Pod phase, Pod IP, node name, start time, container readiness, restart count, state, reason, and message.
-- Bad image deployments can be diagnosed through the Pod API. For example, an image pull failure can surface as a waiting container with `ImagePullBackOff`.
-
-### Phase 3 API Test Example
-
-PowerShell:
-
-```powershell
-$body = @{
-  service_name = "demo-web"
-  environment = "staging"
-  image = "nginx:latest"
-  replicas = 1
-  cpu_request = "100m"
-  cpu_limit = "500m"
-  memory_request = "128Mi"
-  memory_limit = "512Mi"
-  expose_external = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/api/projects" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-Check Kubernetes resources:
-
-```bash
-kubectl get all -n demo-web-staging
-```
-
-Check Pod status through the API:
-
-```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "http://127.0.0.1:8000/api/projects/2/pods"
-```
-
-### Bad Image Test Example
-
-Use a project request such as:
-
-```powershell
-$body = @{
-  service_name = "bad-image"
-  environment = "staging"
-  image = "nginx-not-exist-abc:latest"
-  replicas = 1
-  expose_external = $false
-} | ConvertTo-Json
-```
-
-After the Deployment is created, inspect Pods:
-
-```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "http://127.0.0.1:8000/api/projects/3/pods"
-```
-
-The project can be `RUNNING` because Kubernetes accepted the resources, while the Pod API reveals container waiting reasons such as `ImagePullBackOff`.
-
-## Phase 4: Kubernetes Event 조회 API
-
-This phase adds project-scoped Kubernetes Event lookup for operational troubleshooting:
-
-- `GET /api/projects/{project_id}/events` API added.
-- Kubernetes Events are listed from the project's Namespace.
-- Namespace-wide Events are filtered down to resources related to the project.
-- Event `type`, `reason`, `message`, and `count` are returned.
-- `involved_object_kind` and `involved_object_name` are returned.
-- `first_timestamp`, `last_timestamp`, and `event_time` are returned as ISO strings when present.
-- `source_component` is returned when Kubernetes provides it.
-- Bad image deployments can now show related Failed, BackOff, ErrImagePull, and ImagePullBackOff event history.
-
-The Pod status API shows the current container state. The Event lookup API shows the history Kubernetes recorded while scheduling resources, pulling images, and creating or starting containers. This makes issues such as ImagePullBackOff easier to analyze in more detail.
-
-### Phase 4 API Test Example
-
-PowerShell Event lookup:
-
-```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "http://127.0.0.1:8000/api/projects/3/events"
-```
-
-Limit the number of returned Events:
-
-```powershell
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "http://127.0.0.1:8000/api/projects/3/events?limit=20"
-```
-
-Compare with kubectl:
-
-```bash
-kubectl get events -n bad-image-staging --sort-by=.lastTimestamp
-```
-
-Bad image project request example:
-
-```powershell
-$body = @{
-  service_name = "event-fail"
-  environment = "staging"
-  image = "nginx-not-exist-xyz:latest"
-  replicas = 1
-  expose_external = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:8000/api/projects" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-## Local Ingress Browser Access
-
-Projects created with `expose_external=true` get an Ingress host like:
-
-```text
-browser-demo-staging.localtest.me
-```
-
-For browser or curl access on a local kind cluster, the cluster must be created
-with host port mappings and ingress-nginx must be installed:
+For local Ingress browser access, use the scripts with host port settings:
 
 ```powershell
 .\infra\scripts\create-kind-cluster.ps1
 .\infra\scripts\install-ingress-nginx.ps1
 ```
 
-Then create an exposed project and access it through port `8080`:
+For a basic cluster only:
 
 ```powershell
-curl.exe http://browser-demo-staging.localtest.me:8080
+kind create cluster --config infra/kind/kind-config.yaml
 ```
 
-Full local Ingress setup and troubleshooting steps are in
-`docs/08-local-ingress-access.md`.
+### 3. Start the backend
 
-## React Dashboard MVP
+```powershell
+cd backend
+Copy-Item .env.example .env
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-The dashboard lives in `frontend/` and talks to the FastAPI backend through `VITE_API_BASE_URL`.
+Health check:
 
-### Setup
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+OpenAPI docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+### 4. Start the frontend
 
 ```powershell
 cd frontend
 npm install
 Copy-Item .env.example .env
+npm run dev
 ```
 
-Default `.env` value:
+Default frontend environment:
 
 ```text
 VITE_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-### Run
-
-Start the backend first, then run the dashboard:
-
-```powershell
-cd frontend
-npm run dev
-```
-
-Open:
+Dashboard URL:
 
 ```text
 http://127.0.0.1:5173/projects
 ```
 
-The dashboard supports:
+### 5. Validate
 
-- project list
-- project creation
-- project detail
-- Pod status lookup
-- Kubernetes Event lookup
-- Audit Log lookup
-- delete with confirmation
-
-### Verify
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m compileall app
+```
 
 ```powershell
 cd frontend
@@ -347,3 +173,92 @@ npm test
 npm run lint
 npm run build
 ```
+
+## API List
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Check DB and Kubernetes connectivity |
+| `GET` | `/api/projects` | List projects |
+| `POST` | `/api/projects` | Create a project and provision Kubernetes resources |
+| `GET` | `/api/projects/{id}` | Get project detail |
+| `GET` | `/api/projects/{id}/pods` | List project Pod and container status |
+| `GET` | `/api/projects/{id}/events` | List project-scoped Kubernetes Events |
+| `GET` | `/api/projects/{id}/audit-logs` | List project Audit Logs |
+| `POST` | `/api/projects/{id}/sync-status` | Sync DB status from live Pod/Event state |
+| `DELETE` | `/api/projects/{id}` | Delete Kubernetes resources and mark project deleted |
+
+## Key Implementation Points
+
+- Project-owned Kubernetes resources use labels so Pods and Events can be filtered per project.
+- ResourceQuota is created immediately after Namespace creation to enforce tenant boundaries.
+- Service and Ingress are separated: ClusterIP for internal traffic, Ingress for optional browser access.
+- Audit Log entries are created for lifecycle steps, failures, deletion steps, and status sync.
+- `sync-status` closes the gap between resource creation success and actual Pod readiness.
+- React Query keeps project, Pod, Event, and Audit Log data independently cached and refreshable.
+
+## Operations and Incident Response Points
+
+- Container waiting reasons such as `ImagePullBackOff`, `ErrImagePull`, and `CrashLoopBackOff` are visible in the dashboard.
+- Kubernetes Events provide scheduling, image pull, quota, and controller failure context.
+- Audit Logs show the exact order of platform actions and where a workflow failed.
+- Deletion follows reverse dependency order to reduce leftover resources.
+- Status drift can be corrected through `sync-status`, which updates the DB from live Kubernetes state.
+
+## Troubleshooting
+
+See [docs/troubleshooting.md](docs/troubleshooting.md) for detailed runbooks.
+
+Covered topics:
+
+- kubeconfig context errors
+- kind hostPort not applied
+- ingress-nginx missing or not ready
+- `ImagePullBackOff`
+- ResourceQuota exceeded
+- CORS errors
+- DB column drift after model changes
+- Project status mismatch solved by `sync-status`
+
+## Screenshot Scenarios
+
+See [docs/screenshot-scenarios.md](docs/screenshot-scenarios.md) for portfolio capture guidance.
+
+Recommended screenshots:
+
+1. Project list
+2. Project creation form
+3. `expose_external=true` request
+4. Ingress host display
+5. Pod Running status
+6. `ImagePullBackOff` failure state
+7. FAILED status after `sync-status`
+8. Audit Log timeline
+9. DELETED status after deletion
+
+## Hyundai AutoEver Platform Developer Fit
+
+This project connects directly to the Platform Developer role because it combines backend API development, database modeling, frontend dashboard work, Kubernetes automation, local container infrastructure, network exposure, and operational traceability.
+
+Highlights:
+
+- Python FastAPI platform API.
+- SQL/MariaDB persistence for requests, status, and audit logs.
+- JavaScript/TypeScript React dashboard.
+- Kubernetes resource lifecycle automation.
+- Docker/kind local cluster reproducibility.
+- Service/Ingress networking understanding.
+- Audit Log and status sync for operations visibility.
+- Clear extension path to Helm, ArgoCD, GKE, RBAC, and Prometheus/Grafana.
+
+See [docs/job-fit.md](docs/job-fit.md) for a detailed mapping.
+
+## Future Extensions
+
+- Helm: standardize Kubernetes manifests as charts.
+- ArgoCD: move provisioning to GitOps and detect drift.
+- GKE: run the MVP on a managed Kubernetes environment.
+- RBAC: add user/team permissions and approval workflows.
+- Prometheus/Grafana: add metrics, dashboards, and SLO views.
+- Authentication: integrate SSO or OAuth.
+- Multi-tenancy: add team quotas, network policies, and cost tags.
