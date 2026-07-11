@@ -1,7 +1,8 @@
-﻿from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.audit import create_audit_log
 from app.db import get_db
 from app.k8s_client import (
     create_deployment,
@@ -12,8 +13,8 @@ from app.k8s_client import (
     list_project_events,
     list_project_pods,
 )
-from app.models import Project, ProjectStatus
-from app.schemas import ProjectCreateRequest, ProjectEventResponse, ProjectResponse, PodResponse
+from app.models import AuditLog, Project, ProjectStatus
+from app.schemas import AuditLogResponse, ProjectCreateRequest, ProjectEventResponse, ProjectResponse, PodResponse
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -46,6 +47,39 @@ def _mark_failed(project: Project, result: dict, db: Session) -> Project:
 
 def _is_success(result: dict) -> bool:
     return result.get("status") in SUCCESS_STATUSES
+
+
+def _log_project_event(
+    db: Session,
+    project: Project,
+    action: str,
+    status: str,
+    message: str | None = None,
+) -> None:
+    create_audit_log(
+        db=db,
+        project_id=project.id,
+        action=action,
+        status=status,
+        message=message,
+    )
+
+
+def _mark_failed_with_audit(
+    project: Project,
+    result: dict,
+    db: Session,
+    action: str,
+) -> Project:
+    failed_project = _mark_failed(project, result, db)
+    _log_project_event(
+        db=db,
+        project=failed_project,
+        action=action,
+        status="FAILED",
+        message=failed_project.error_message,
+    )
+    return failed_project
 
 def _is_delete_success(result: dict) -> bool:
     return result.get("status") in {"deleted", "not_found"}
@@ -101,9 +135,25 @@ def create_project(
     db.commit()
     db.refresh(project)
 
+    _log_project_event(
+        db=db,
+        project=project,
+        action="PROJECT_CREATE_REQUESTED",
+        status="SUCCESS",
+        message=f"Project request saved for namespace={project.namespace}",
+    )
+
     project.status = ProjectStatus.PROVISIONING
     db.commit()
     db.refresh(project)
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="PROJECT_PROVISIONING_STARTED",
+        status="SUCCESS",
+        message="Project provisioning started",
+    )
 
     namespace_result = create_namespace(
         namespace,
@@ -112,7 +162,20 @@ def create_project(
         request.environment,
     )
     if not _is_success(namespace_result):
-        return _mark_failed(project, namespace_result, db)
+        return _mark_failed_with_audit(
+            project,
+            namespace_result,
+            db,
+            "NAMESPACE_CREATE_FAILED",
+        )
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="NAMESPACE_CREATED",
+        status="SUCCESS",
+        message=f"Namespace created: {project.namespace}",
+    )
 
     quota_result = create_resource_quota(
         namespace=namespace,
@@ -121,7 +184,20 @@ def create_project(
         environment=request.environment,
     )
     if not _is_success(quota_result):
-        return _mark_failed(project, quota_result, db)
+        return _mark_failed_with_audit(
+            project,
+            quota_result,
+            db,
+            "RESOURCE_QUOTA_CREATE_FAILED",
+        )
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="RESOURCE_QUOTA_CREATED",
+        status="SUCCESS",
+        message=f"ResourceQuota created in namespace={project.namespace}",
+    )
 
     deployment_result = create_deployment(
         namespace=namespace,
@@ -136,7 +212,20 @@ def create_project(
         memory_limit=request.memory_limit,
     )
     if not _is_success(deployment_result):
-        return _mark_failed(project, deployment_result, db)
+        return _mark_failed_with_audit(
+            project,
+            deployment_result,
+            db,
+            "DEPLOYMENT_CREATE_FAILED",
+        )
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="DEPLOYMENT_CREATED",
+        status="SUCCESS",
+        message=f"Deployment created: {project.service_name}",
+    )
 
     service_result = create_service(
         namespace=namespace,
@@ -145,12 +234,34 @@ def create_project(
         environment=request.environment,
     )
     if not _is_success(service_result):
-        return _mark_failed(project, service_result, db)
+        return _mark_failed_with_audit(
+            project,
+            service_result,
+            db,
+            "SERVICE_CREATE_FAILED",
+        )
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="SERVICE_CREATED",
+        status="SUCCESS",
+        message=f"Service created: {project.service_name}-svc",
+    )
 
     project.status = ProjectStatus.RUNNING
     project.error_message = None
     db.commit()
     db.refresh(project)
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="PROJECT_RUNNING",
+        status="SUCCESS",
+        message="Project provisioning completed",
+    )
+
     return project
 
 
@@ -226,23 +337,92 @@ def delete_project(
     db.commit()
     db.refresh(project)
 
+    _log_project_event(
+        db=db,
+        project=project,
+        action="PROJECT_DELETE_REQUESTED",
+        status="SUCCESS",
+        message=f"Project delete requested for namespace={project.namespace}",
+    )
+
     delete_results = delete_project_resources(
         namespace=project.namespace,
         service_name=project.service_name,
     )
+
+    delete_action_by_resource = {
+        "service": "SERVICE_DELETED",
+        "deployment": "DEPLOYMENT_DELETED",
+        "resourcequota": "RESOURCE_QUOTA_DELETED",
+        "namespace": "NAMESPACE_DELETED",
+    }
+
+    for result in delete_results:
+        resource = result.get("resource", "unknown")
+        name = result.get("name", "unknown")
+        result_status = "SUCCESS" if _is_delete_success(result) else "FAILED"
+        action = delete_action_by_resource.get(resource, "K8S_RESOURCE_DELETED")
+        message = f"{resource}/{name}: {result.get('status')}"
+        if result.get("message"):
+            message = f"{message} - {result.get('message')}"
+        _log_project_event(
+            db=db,
+            project=project,
+            action=action,
+            status=result_status,
+            message=message,
+        )
 
     if any(not _is_delete_success(result) for result in delete_results):
         project.status = ProjectStatus.FAILED
         project.error_message = _format_delete_error_message(delete_results)
         db.commit()
         db.refresh(project)
+
+        _log_project_event(
+            db=db,
+            project=project,
+            action="PROJECT_DELETE_FAILED",
+            status="FAILED",
+            message=project.error_message,
+        )
+
         return project
 
     project.status = ProjectStatus.DELETED
     project.error_message = None
     db.commit()
     db.refresh(project)
+
+    _log_project_event(
+        db=db,
+        project=project,
+        action="PROJECT_DELETED",
+        status="SUCCESS",
+        message="Project resources deleted successfully",
+    )
+
     return project
+
+
+@router.get("/{project_id}/audit-logs", response_model=list[AuditLogResponse])
+def get_project_audit_logs(
+    project_id: int,
+    db: Session = Depends(get_db),
+) -> list[AuditLog]:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+    return list(
+        db.execute(
+            select(AuditLog)
+            .where(AuditLog.project_id == project_id)
+            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+        ).scalars()
+    )
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 def get_project(

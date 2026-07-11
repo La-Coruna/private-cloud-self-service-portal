@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -73,3 +73,14 @@ class ProjectEventResponse(BaseModel):
     last_timestamp: str | None
     event_time: str | None
     source_component: str | None
+
+
+class AuditLogResponse(BaseModel):
+    id: int
+    project_id: int
+    action: str
+    status: str
+    message: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

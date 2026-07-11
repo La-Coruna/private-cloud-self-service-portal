@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.audit import create_audit_log
 from app.db import Base
 from app.k8s_client import (
     build_selector_labels,
@@ -24,16 +25,72 @@ from app.k8s_client import (
     list_project_events,
     list_project_pods,
 )
-from app.models import Project, ProjectStatus
+from app.models import AuditLog, Project, ProjectStatus
 from app.routers.projects import (
     create_project,
     delete_project,
     get_project,
+    get_project_audit_logs,
     get_project_events,
     get_project_pods,
     list_projects,
 )
 from app.schemas import ProjectCreateRequest
+
+
+class AuditLogHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.engine = create_engine(
+            "sqlite+pysqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=self.engine,
+        )
+        Base.metadata.create_all(bind=self.engine)
+        self.db = self.SessionLocal()
+
+    def tearDown(self) -> None:
+        self.db.close()
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_create_audit_log_persists_project_lifecycle_event(self) -> None:
+        project = Project(
+            service_name="audit-demo",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="audit-demo-staging",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+
+        log = create_audit_log(
+            db=self.db,
+            project_id=project.id,
+            action="PROJECT_RUNNING",
+            status="SUCCESS",
+            message="Project provisioning completed",
+        )
+
+        self.assertIsNotNone(log.id)
+        self.assertEqual(log.project_id, project.id)
+        self.assertEqual(log.action, "PROJECT_RUNNING")
+        self.assertEqual(log.status, "SUCCESS")
+        self.assertEqual(log.message, "Project provisioning completed")
+        saved_logs = self.db.query(AuditLog).filter(AuditLog.project_id == project.id).all()
+        self.assertEqual(len(saved_logs), 1)
 
 
 class ProjectSchemaTests(unittest.TestCase):
@@ -176,6 +233,25 @@ class ProjectApiTests(unittest.TestCase):
             saved_project = db.get(Project, project.id)
             self.assertIsNotNone(saved_project)
             self.assertEqual(saved_project.status, ProjectStatus.RUNNING)
+            audit_actions = [
+                log.action
+                for log in db.query(AuditLog)
+                .filter(AuditLog.project_id == project.id)
+                .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+                .all()
+            ]
+            self.assertEqual(
+                audit_actions,
+                [
+                    "PROJECT_CREATE_REQUESTED",
+                    "PROJECT_PROVISIONING_STARTED",
+                    "NAMESPACE_CREATED",
+                    "RESOURCE_QUOTA_CREATED",
+                    "DEPLOYMENT_CREATED",
+                    "SERVICE_CREATED",
+                    "PROJECT_RUNNING",
+                ],
+            )
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
@@ -289,6 +365,23 @@ class ProjectApiTests(unittest.TestCase):
         self.assertIn("deployment denied", project.error_message)
         self.assertIn("quota exceeded", project.error_message)
         mock_create_service.assert_not_called()
+        audit_actions = [
+            log.action
+            for log in self.db.query(AuditLog)
+            .filter(AuditLog.project_id == project.id)
+            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            .all()
+        ]
+        self.assertEqual(
+            audit_actions,
+            [
+                "PROJECT_CREATE_REQUESTED",
+                "PROJECT_PROVISIONING_STARTED",
+                "NAMESPACE_CREATED",
+                "RESOURCE_QUOTA_CREATED",
+                "DEPLOYMENT_CREATE_FAILED",
+            ],
+        )
 
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
@@ -522,6 +615,51 @@ class ProjectApiTests(unittest.TestCase):
         self.assertEqual(exc.exception.status_code, 500)
         self.assertEqual(exc.exception.detail, "pods unavailable")
 
+    def test_get_project_audit_logs_returns_project_logs_in_created_order(self) -> None:
+        project = Project(
+            service_name="audit-demo",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="audit-demo-staging",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        create_audit_log(
+            db=self.db,
+            project_id=project.id,
+            action="PROJECT_CREATE_REQUESTED",
+            status="SUCCESS",
+            message="created",
+        )
+        create_audit_log(
+            db=self.db,
+            project_id=project.id,
+            action="PROJECT_RUNNING",
+            status="SUCCESS",
+            message="running",
+        )
+
+        logs = get_project_audit_logs(project_id=project.id, db=self.db)
+
+        self.assertEqual(
+            [log.action for log in logs],
+            ["PROJECT_CREATE_REQUESTED", "PROJECT_RUNNING"],
+        )
+
+    def test_get_project_audit_logs_returns_404_for_missing_project(self) -> None:
+        with self.assertRaises(HTTPException) as exc:
+            get_project_audit_logs(project_id=999, db=self.db)
+
+        self.assertEqual(exc.exception.status_code, 404)
+        self.assertEqual(exc.exception.detail, "Project not found: 999")
 
     def test_get_project_events_returns_404_for_missing_project(self) -> None:
         with self.assertRaises(HTTPException) as exc:
@@ -654,6 +792,24 @@ class ProjectApiTests(unittest.TestCase):
             saved_project = db.get(Project, project.id)
             self.assertEqual(saved_project.status, ProjectStatus.DELETED)
             self.assertIsNone(saved_project.error_message)
+            audit_actions = [
+                log.action
+                for log in db.query(AuditLog)
+                .filter(AuditLog.project_id == project.id)
+                .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+                .all()
+            ]
+            self.assertEqual(
+                audit_actions,
+                [
+                    "PROJECT_DELETE_REQUESTED",
+                    "SERVICE_DELETED",
+                    "DEPLOYMENT_DELETED",
+                    "RESOURCE_QUOTA_DELETED",
+                    "NAMESPACE_DELETED",
+                    "PROJECT_DELETED",
+                ],
+            )
 
     @patch("app.routers.projects.delete_project_resources")
     def test_delete_project_returns_deleted_project_without_redeleting(
