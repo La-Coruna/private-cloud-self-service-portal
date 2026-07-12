@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal-backend
+  namespace: portal-system
+  labels:
+    app: portal-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portal-backend
+  template:
+    metadata:
+      labels:
+        app: portal-backend
+    spec:
+      serviceAccountName: portal-backend
+      containers:
+        - name: backend
+          image: portal-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: APP_ENV
+              value: demo
+            - name: DB_HOST
+              value: portal-mariadb
+            - name: DB_PORT
+              value: "3306"
+            - name: DB_NAME
+              value: portal_db
+            - name: DB_USER
+              value: portal_user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: portal-db-secret
+                  key: db-password
+            - name: KUBE_CONTEXT
+              value: ""
+            - name: DEMO_MODE
+              value: "true"
+            - name: DEMO_MAX_PROJECTS
+              value: "3"
+            - name: DEMO_MAX_REPLICAS
+              value: "1"
+            - name: DEMO_ALLOWED_IMAGES
+              value: nginx:latest,httpd:alpine,nginx-not-exist-demo:latest
+            - name: DEMO_NAMESPACE_PREFIX
+              value: demo-
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

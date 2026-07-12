@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portal-system
+  labels:
+    app.kubernetes.io/name: private-cloud-self-service-portal
+    app.kubernetes.io/part-of: private-cloud-self-service-portal

@@ -15,6 +15,12 @@ class Settings(BaseSettings):
 
     kube_context: str = "kind-portal-dev"
 
+    demo_mode: bool = False
+    demo_max_projects: int = 3
+    demo_max_replicas: int = 1
+    demo_allowed_images: str = "nginx:latest,httpd:alpine,nginx-not-exist-demo:latest"
+    demo_namespace_prefix: str = "demo-"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -253,6 +253,32 @@ Highlights:
 
 See [docs/job-fit.md](docs/job-fit.md) for a detailed mapping.
 
+
+
+## Public Demo Deployment
+
+A GCP GKE Autopilot public demo deployment package is available under `infra/gcp/`.
+
+It includes:
+
+- backend and frontend Dockerfiles
+- GKE manifests for `portal-system`
+- MariaDB demo deployment
+- least-privilege backend ServiceAccount/RBAC
+- public Ingress routing `/api` to FastAPI and `/` to React
+- PowerShell scripts for enabling APIs, pushing images, creating GKE Autopilot, deploying, smoke testing, and cleanup
+
+Important safety defaults:
+
+- `DEMO_MODE=true` in GKE
+- maximum 3 active demo projects
+- maximum 1 replica per project
+- allowed images only: `nginx:latest`, `httpd:alpine`, `nginx-not-exist-demo:latest`
+- generated namespaces are prefixed with `demo-`
+- no GCP credentials, service account keys, kubeconfig, or real `.env` values are committed
+
+See [docs/gcp-demo-deployment.md](docs/gcp-demo-deployment.md) for the full deployment and cleanup guide.
+
 ## Future Extensions
 
 - Helm: standardize Kubernetes manifests as charts.

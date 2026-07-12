@@ -18,7 +18,10 @@ DEFAULT_RESOURCE_QUOTA_HARD = {
 
 def load_kube_config() -> None:
     settings = get_settings()
-    config.load_kube_config(context=settings.kube_context)
+    if settings.kube_context:
+        config.load_kube_config(context=settings.kube_context)
+        return
+    config.load_incluster_config()
 
 
 def build_common_labels(project_id: int, service_name: str, environment: str) -> dict[str, str]:

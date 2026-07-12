@@ -1,4 +1,5 @@
 ﻿from datetime import datetime, timezone
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -27,9 +28,11 @@ from app.k8s_client import (
     delete_service,
     list_project_events,
     list_project_pods,
+    load_kube_config,
 )
 from app.models import AuditLog, Project, ProjectStatus
 from app.routers.projects import (
+    build_namespace,
     create_project,
     delete_project,
     get_project,
@@ -614,6 +617,148 @@ class ProjectApiTests(unittest.TestCase):
             "Namespace already requested: demo-api-dev",
         )
 
+    @patch("app.routers.projects.get_settings")
+    def test_build_namespace_uses_demo_prefix_when_demo_mode_is_enabled(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(
+            demo_mode=True,
+            demo_namespace_prefix="demo-",
+        )
+
+        self.assertEqual(
+            build_namespace("portfolio-demo", "staging"),
+            "demo-portfolio-demo-staging",
+        )
+
+    @patch("app.routers.projects.get_settings")
+    def test_create_project_demo_mode_rejects_unapproved_service_prefix(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(
+            demo_mode=True,
+            demo_namespace_prefix="demo-",
+            demo_allowed_images=["nginx:latest"],
+            demo_max_replicas=1,
+            demo_max_projects=3,
+        )
+
+        with self.assertRaises(HTTPException) as exc:
+            create_project(
+                request=ProjectCreateRequest(
+                    service_name="private-demo",
+                    environment="staging",
+                    image="nginx:latest",
+                    replicas=1,
+                    expose_external=False,
+                ),
+                db=self.db,
+            )
+
+        self.assertEqual(exc.exception.status_code, 400)
+        self.assertIn("demo-, portfolio-, or broken-", exc.exception.detail)
+
+    @patch("app.routers.projects.get_settings")
+    def test_create_project_demo_mode_rejects_unapproved_image(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(
+            demo_mode=True,
+            demo_namespace_prefix="demo-",
+            demo_allowed_images=["nginx:latest"],
+            demo_max_replicas=1,
+            demo_max_projects=3,
+        )
+
+        with self.assertRaises(HTTPException) as exc:
+            create_project(
+                request=ProjectCreateRequest(
+                    service_name="portfolio-demo",
+                    environment="staging",
+                    image="redis:latest",
+                    replicas=1,
+                    expose_external=False,
+                ),
+                db=self.db,
+            )
+
+        self.assertEqual(exc.exception.status_code, 400)
+        self.assertIn("not allowed in demo mode", exc.exception.detail)
+
+    @patch("app.routers.projects.get_settings")
+    def test_create_project_demo_mode_rejects_too_many_replicas(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(
+            demo_mode=True,
+            demo_namespace_prefix="demo-",
+            demo_allowed_images=["nginx:latest"],
+            demo_max_replicas=1,
+            demo_max_projects=3,
+        )
+
+        with self.assertRaises(HTTPException) as exc:
+            create_project(
+                request=ProjectCreateRequest(
+                    service_name="portfolio-demo",
+                    environment="staging",
+                    image="nginx:latest",
+                    replicas=2,
+                    expose_external=False,
+                ),
+                db=self.db,
+            )
+
+        self.assertEqual(exc.exception.status_code, 400)
+        self.assertIn("replicas cannot exceed 1", exc.exception.detail)
+
+    @patch("app.routers.projects.get_settings")
+    def test_create_project_demo_mode_rejects_when_active_project_limit_is_reached(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(
+            demo_mode=True,
+            demo_namespace_prefix="demo-",
+            demo_allowed_images=["nginx:latest"],
+            demo_max_replicas=1,
+            demo_max_projects=1,
+        )
+        active = Project(
+            service_name="demo-active",
+            environment="staging",
+            image="nginx:latest",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            expose_external=False,
+            namespace="demo-demo-active-staging",
+            status=ProjectStatus.RUNNING,
+        )
+        self.db.add(active)
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as exc:
+            create_project(
+                request=ProjectCreateRequest(
+                    service_name="portfolio-demo",
+                    environment="staging",
+                    image="nginx:latest",
+                    replicas=1,
+                    expose_external=False,
+                ),
+                db=self.db,
+            )
+
+        self.assertEqual(exc.exception.status_code, 409)
+        self.assertIn("demo project limit reached", exc.exception.detail)
+
     @patch("app.routers.projects.create_service")
     @patch("app.routers.projects.create_deployment")
     @patch("app.routers.projects.create_resource_quota")
@@ -1155,6 +1300,40 @@ class ProjectApiTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.status_code, 404)
         self.assertEqual(exc.exception.detail, "Project not found: 999")
+
+class KubernetesConfigTests(unittest.TestCase):
+    @patch("app.k8s_client.config.load_incluster_config")
+    @patch("app.k8s_client.config.load_kube_config")
+    @patch("app.k8s_client.get_settings")
+    def test_load_kube_config_uses_named_context_when_present(
+        self,
+        mock_get_settings: MagicMock,
+        mock_load_kube_config: MagicMock,
+        mock_load_incluster_config: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(kube_context="kind-portal-dev")
+
+        load_kube_config()
+
+        mock_load_kube_config.assert_called_once_with(context="kind-portal-dev")
+        mock_load_incluster_config.assert_not_called()
+
+    @patch("app.k8s_client.config.load_incluster_config")
+    @patch("app.k8s_client.config.load_kube_config")
+    @patch("app.k8s_client.get_settings")
+    def test_load_kube_config_uses_incluster_config_when_context_is_empty(
+        self,
+        mock_get_settings: MagicMock,
+        mock_load_kube_config: MagicMock,
+        mock_load_incluster_config: MagicMock,
+    ) -> None:
+        mock_get_settings.return_value = SimpleNamespace(kube_context="")
+
+        load_kube_config()
+
+        mock_load_incluster_config.assert_called_once()
+        mock_load_kube_config.assert_not_called()
+
 
 class KubernetesNamespaceTests(unittest.TestCase):
     def test_build_selector_labels_includes_service_name_and_project_id(self) -> None:

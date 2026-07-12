@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal-mariadb
+  namespace: portal-system
+spec:
+  type: ClusterIP
+  selector:
+    app: portal-mariadb
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.audit import create_audit_log
+from app.config import get_settings
 from app.db import get_db
 from app.k8s_client import (
     build_ingress_host,
@@ -33,10 +34,60 @@ FAILURE_WAITING_REASONS = {
     "RunContainerError",
 }
 FAILURE_EVENT_REASONS = {"BackOff", "Failed", "FailedCreate", "FailedMount", "FailedScheduling"}
+DEMO_SERVICE_PREFIXES = ("demo-", "portfolio-", "broken-")
+ACTIVE_DEMO_STATUSES = (ProjectStatus.RUNNING, ProjectStatus.PROVISIONING)
+
+
+def _demo_allowed_images(settings) -> list[str]:
+    allowed_images = getattr(settings, "demo_allowed_images", [])
+    if isinstance(allowed_images, str):
+        return [image.strip() for image in allowed_images.split(",") if image.strip()]
+    return list(allowed_images)
 
 
 def build_namespace(service_name: str, environment: str) -> str:
-    return f"{service_name}-{environment}"
+    settings = get_settings()
+    prefix = settings.demo_namespace_prefix if settings.demo_mode else ""
+    return f"{prefix}{service_name}-{environment}"
+
+
+def _validate_demo_project_request(
+    request: ProjectCreateRequest,
+    db: Session,
+) -> None:
+    settings = get_settings()
+    if not settings.demo_mode:
+        return
+
+    if not request.service_name.startswith(DEMO_SERVICE_PREFIXES):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Demo mode allows only demo-, portfolio-, or broken- service names",
+        )
+
+    allowed_images = _demo_allowed_images(settings)
+    if request.image not in allowed_images:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Image is not allowed in demo mode: {request.image}",
+        )
+
+    if request.replicas > settings.demo_max_replicas:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Demo mode replicas cannot exceed {settings.demo_max_replicas}",
+        )
+
+    active_count = db.scalar(
+        select(func.count())
+        .select_from(Project)
+        .where(Project.status.in_(ACTIVE_DEMO_STATUSES))
+    )
+    if active_count >= settings.demo_max_projects:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"demo project limit reached: {settings.demo_max_projects}",
+        )
 
 
 def _format_kubernetes_error(result: dict) -> str:
@@ -192,6 +243,7 @@ def create_project(
     request: ProjectCreateRequest,
     db: Session = Depends(get_db),
 ) -> Project:
+    _validate_demo_project_request(request, db)
     namespace = build_namespace(request.service_name, request.environment)
     existing_project = db.execute(
         select(Project).where(Project.namespace == namespace)
