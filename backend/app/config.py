@@ -27,6 +27,7 @@ class Settings(BaseSettings):
         "http://localhost:4173"
     )
     ingress_base_domain: str = "localtest.me"
+    app_ingress_class_name: str = "nginx"
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -141,7 +141,54 @@ Custom domain values used by the live demo:
 
 The current public demo uses HTTP only. HTTPS can be added later with Google-managed certificates or cert-manager. If the GKE Load Balancer IP changes, update the DNS A records.
 
-Note: GKE `gce` Ingress creates separate Load Balancers for app Ingress resources. The generated host is correct, but wildcard DNS must point at the app Ingress IP, or the architecture should move to a shared ingress controller or DNS automation for app routes.
+Legacy note: GKE `gce` Ingress creates separate Load Balancers for app Ingress resources. New app Ingress resources now use `ingressClassName=nginx` and route through the shared ingress-nginx controller.
+## Shared App Ingress
+
+App Ingress resources are routed through a shared ingress-nginx controller instead of creating one GCE Load Balancer per app.
+
+Install or verify the shared controller:
+
+```powershell
+.\infra\gcp\scripts\07-install-shared-ingress-nginx.ps1 `
+  -ProjectId private-cloud-portal-demo `
+  -Region asia-northeast3 `
+  -ClusterName portal-demo
+
+.\infra\gcp\scripts\08-check-shared-ingress-nginx.ps1
+```
+
+Live shared ingress-nginx External IP:
+
+```text
+8.230.7.230
+```
+
+Update Spaceship DNS for app routes:
+
+```text
+A *.apps -> 8.230.7.230
+```
+
+Backend app Ingress settings:
+
+```text
+INGRESS_BASE_DOMAIN=apps.la-coruna.xyz
+APP_INGRESS_CLASS_NAME=nginx
+```
+
+New app Ingress resources should show `CLASS=nginx` and route through the shared ingress-nginx LoadBalancer. Before DNS propagation, verify with:
+
+```powershell
+curl.exe -I --resolve demo-shared-ingress-staging.apps.la-coruna.xyz:80:8.230.7.230 http://demo-shared-ingress-staging.apps.la-coruna.xyz/
+```
+
+Expected result:
+
+```text
+HTTP/1.1 200 OK
+```
+
+Cost note: existing app Ingress resources that were created without `ingressClassName=nginx` may still own separate GCE Load Balancers. In the live demo, `demo-test-ingress` and `demo-domain-ingress` still have separate GCE Ingress addresses until explicitly removed.
 
 ## Demo Login / Access Token
 

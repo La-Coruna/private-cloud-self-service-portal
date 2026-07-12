@@ -54,6 +54,8 @@ spec:
               value: http://localhost:5173,http://127.0.0.1:5173,http://portal.la-coruna.xyz
             - name: INGRESS_BASE_DOMAIN
               value: apps.la-coruna.xyz
+            - name: APP_INGRESS_CLASS_NAME
+              value: nginx
           readinessProbe:
             httpGet:
               path: /health

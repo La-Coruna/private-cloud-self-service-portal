@@ -266,6 +266,7 @@ Live demo:
 - Backend health: http://portal.la-coruna.xyz/health
 - Load Balancer IP: http://136.69.1.154/projects
 - App wildcard domain: *.apps.la-coruna.xyz
+- Shared app ingress IP: 8.230.7.230
 
 It includes:
 
@@ -295,6 +296,14 @@ Deployment verification completed on GKE Autopilot:
 - custom domain routing was verified for the portal domain
 - generated app hosts use `*.apps.la-coruna.xyz`, for example `demo-domain-ingress-staging.apps.la-coruna.xyz`
 
+
+App routing architecture:
+
+- `portal.la-coruna.xyz` continues to use the portal GCE Ingress Load Balancer.
+- `*.apps.la-coruna.xyz` should point to the shared ingress-nginx LoadBalancer IP `8.230.7.230`.
+- New app Ingress resources use `ingressClassName=nginx` so they do not create a separate GCE Load Balancer per app.
+- Before DNS propagation, app routing can be verified with `curl --resolve` against the shared ingress-nginx IP.
+- Existing per-app GCE Ingress resources can still incur cost until explicitly removed.
 See [docs/gcp-demo-deployment.md](docs/gcp-demo-deployment.md) for the full deployment and cleanup guide.
 
 ## Future Extensions

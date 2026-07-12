@@ -303,6 +303,7 @@ def create_ingress(
     environment: str,
     host: str,
 ) -> dict:
+    settings = get_settings()
     ingress_name = f"{service_name}-ingress"
     service_name_with_suffix = f"{service_name}-svc"
     try:
@@ -316,6 +317,7 @@ def create_ingress(
                 labels=build_common_labels(project_id, service_name, environment),
             ),
             spec=client.V1IngressSpec(
+                ingress_class_name=settings.app_ingress_class_name,
                 rules=[
                     client.V1IngressRule(
                         host=host,

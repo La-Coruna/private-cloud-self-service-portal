@@ -1610,6 +1610,11 @@ class KubernetesNamespaceTests(unittest.TestCase):
                 ],
             )
         get_settings.cache_clear()
+    def test_settings_reads_app_ingress_class_name(self) -> None:
+        with patch.dict("os.environ", {"APP_INGRESS_CLASS_NAME": "nginx"}):
+            get_settings.cache_clear()
+            self.assertEqual(get_settings().app_ingress_class_name, "nginx")
+        get_settings.cache_clear()
 
     @patch("app.k8s_client.client.NetworkingV1Api")
     @patch("app.k8s_client.load_kube_config")
@@ -1636,6 +1641,7 @@ class KubernetesNamespaceTests(unittest.TestCase):
         self.assertEqual(api.create_namespaced_ingress.call_args.kwargs["namespace"], "demo-api-staging")
         self.assertEqual(ingress.metadata.name, "demo-api-ingress")
         self.assertEqual(ingress.metadata.namespace, "demo-api-staging")
+        self.assertEqual(ingress.spec.ingress_class_name, "nginx")
         self.assertEqual(ingress.spec.rules[0].host, "demo-api-staging.localtest.me")
         path = ingress.spec.rules[0].http.paths[0]
         self.assertEqual(path.path, "/")
