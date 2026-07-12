@@ -259,6 +259,11 @@ See [docs/job-fit.md](docs/job-fit.md) for a detailed mapping.
 
 A GCP GKE Autopilot public demo deployment package is available under `infra/gcp/`.
 
+Live demo:
+
+- Dashboard: http://136.69.1.154/projects
+- Backend health: http://136.69.1.154/health
+
 It includes:
 
 - backend and frontend Dockerfiles
@@ -276,6 +281,14 @@ Important safety defaults:
 - allowed images only: `nginx:latest`, `httpd:alpine`, `nginx-not-exist-demo:latest`
 - generated namespaces are prefixed with `demo-`
 - no GCP credentials, service account keys, kubeconfig, or real `.env` values are committed
+
+Deployment verification completed on GKE Autopilot:
+
+- `portal-backend`, `portal-frontend`, and `portal-mariadb` are running in `portal-system`
+- `portfolio-demo` normal deployment was verified with a Running Pod
+- `broken-demo` failure deployment was verified with `ImagePullBackOff`
+- `POST /api/projects/{id}/sync-status` updated the failed project to `FAILED`
+- demo projects were deleted after verification to reduce cost
 
 See [docs/gcp-demo-deployment.md](docs/gcp-demo-deployment.md) for the full deployment and cleanup guide.
 
