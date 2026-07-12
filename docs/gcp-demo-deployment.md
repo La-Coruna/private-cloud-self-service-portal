@@ -54,7 +54,7 @@ Enable them:
 
 ## Build and Push Images
 
-The frontend is built with `/api` as its API base URL so browser requests go through the same public Ingress.
+For the IP-only demo, the frontend can be built with `/api` as its API base URL so browser requests go through the same public Ingress. For the custom domain demo, build it with `http://portal.la-coruna.xyz` so requests use `http://portal.la-coruna.xyz/api/...`.
 
 ```powershell
 .\infra\gcp\scripts\03-build-and-push-images.ps1 `
@@ -62,7 +62,7 @@ The frontend is built with `/api` as its API base URL so browser requests go thr
   -Region asia-northeast3 `
   -Repository portal-demo `
   -Tag latest `
-  -ApiBaseUrl /api
+  -ApiBaseUrl http://portal.la-coruna.xyz
 ```
 
 This pushes:
@@ -129,8 +129,19 @@ If you already know the URL:
 Open the dashboard:
 
 ```text
-http://<INGRESS_IP>/projects
+http://portal.la-coruna.xyz/projects
 ```
+
+Custom domain values used by the live demo:
+
+- Portal URL: `http://portal.la-coruna.xyz/projects`
+- API base: `http://portal.la-coruna.xyz/api`
+- App wildcard domain: `*.apps.la-coruna.xyz`
+- Example generated app host: `demo-domain-ingress-staging.apps.la-coruna.xyz`
+
+The current public demo uses HTTP only. HTTPS can be added later with Google-managed certificates or cert-manager. If the GKE Load Balancer IP changes, update the DNS A records.
+
+Note: GKE `gce` Ingress creates separate Load Balancers for app Ingress resources. The generated host is correct, but wildcard DNS must point at the app Ingress IP, or the architecture should move to a shared ingress controller or DNS automation for app routes.
 
 ## Demo Login / Access Token
 
@@ -166,6 +177,7 @@ Expected result:
 - project is created
 - namespace is prefixed, for example `demo-portfolio-demo-staging`
 - ResourceQuota, Deployment, Service, and Ingress are created
+- when `INGRESS_BASE_DOMAIN=apps.la-coruna.xyz`, the generated host follows `{service_name}-{environment}.apps.la-coruna.xyz`
 - Pod reaches Running
 - Audit Log shows each provisioning step
 

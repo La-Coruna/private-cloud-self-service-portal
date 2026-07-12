@@ -1,4 +1,4 @@
-﻿from kubernetes import client, config
+from kubernetes import client, config
 from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
@@ -41,7 +41,8 @@ def build_selector_labels(project_id: int, service_name: str) -> dict[str, str]:
 
 
 def build_ingress_host(service_name: str, environment: str) -> str:
-    return f"{service_name}-{environment}.localtest.me"
+    settings = get_settings()
+    return f"{service_name}-{environment}.{settings.ingress_base_domain}"
 
 
 def check_kubernetes_connection() -> dict:

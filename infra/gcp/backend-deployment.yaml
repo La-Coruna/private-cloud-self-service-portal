@@ -50,6 +50,10 @@ spec:
               value: nginx:latest,httpd:alpine,nginx-not-exist-demo:latest
             - name: DEMO_NAMESPACE_PREFIX
               value: demo-
+            - name: CORS_ALLOWED_ORIGINS
+              value: http://localhost:5173,http://127.0.0.1:5173,http://portal.la-coruna.xyz
+            - name: INGRESS_BASE_DOMAIN
+              value: apps.la-coruna.xyz
           readinessProbe:
             httpGet:
               path: /health

@@ -261,8 +261,11 @@ A GCP GKE Autopilot public demo deployment package is available under `infra/gcp
 
 Live demo:
 
-- Dashboard: http://136.69.1.154/projects
-- Backend health: http://136.69.1.154/health
+- Dashboard: http://portal.la-coruna.xyz/projects
+- API base: http://portal.la-coruna.xyz/api
+- Backend health: http://portal.la-coruna.xyz/health
+- Load Balancer IP: http://136.69.1.154/projects
+- App wildcard domain: *.apps.la-coruna.xyz
 
 It includes:
 
@@ -289,6 +292,8 @@ Deployment verification completed on GKE Autopilot:
 - `broken-demo` failure deployment was verified with `ImagePullBackOff`
 - `POST /api/projects/{id}/sync-status` updated the failed project to `FAILED`
 - demo projects were deleted after verification to reduce cost
+- custom domain routing was verified for the portal domain
+- generated app hosts use `*.apps.la-coruna.xyz`, for example `demo-domain-ingress-staging.apps.la-coruna.xyz`
 
 See [docs/gcp-demo-deployment.md](docs/gcp-demo-deployment.md) for the full deployment and cleanup guide.
 

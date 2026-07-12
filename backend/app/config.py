@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     demo_max_replicas: int = 1
     demo_allowed_images: str = "nginx:latest,httpd:alpine,nginx-not-exist-demo:latest"
     demo_namespace_prefix: str = "demo-"
+    cors_allowed_origins: str = (
+        "http://127.0.0.1:5173,"
+        "http://localhost:5173,"
+        "http://127.0.0.1:4173,"
+        "http://localhost:4173"
+    )
+    ingress_base_domain: str = "localtest.me"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -33,6 +40,14 @@ class Settings(BaseSettings):
             f"mysql+pymysql://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.cors_allowed_origins.split(",")
+            if origin.strip()
+        ]
 
 
 @lru_cache

@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.audit import create_audit_log
+from app.config import get_settings
 from app.db import Base
 from app.k8s_client import (
     build_ingress_host,
@@ -1573,11 +1574,42 @@ class KubernetesNamespaceTests(unittest.TestCase):
         self.assertEqual(service.spec.ports[0].port, 80)
         self.assertEqual(service.spec.ports[0].target_port, 80)
 
-    def test_build_ingress_host_uses_localtest_domain(self) -> None:
+    def test_build_ingress_host_uses_localtest_domain_by_default(self) -> None:
+        get_settings.cache_clear()
         self.assertEqual(
             build_ingress_host("demo-api", "staging"),
             "demo-api-staging.localtest.me",
         )
+
+    def test_build_ingress_host_uses_configured_base_domain(self) -> None:
+        with patch.dict("os.environ", {"INGRESS_BASE_DOMAIN": "apps.la-coruna.xyz"}):
+            get_settings.cache_clear()
+            self.assertEqual(
+                build_ingress_host("demo-api", "staging"),
+                "demo-api-staging.apps.la-coruna.xyz",
+            )
+        get_settings.cache_clear()
+
+    def test_settings_parses_cors_allowed_origins(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "CORS_ALLOWED_ORIGINS": (
+                    "http://localhost:5173, http://127.0.0.1:5173,"
+                    "http://portal.la-coruna.xyz"
+                )
+            },
+        ):
+            get_settings.cache_clear()
+            self.assertEqual(
+                get_settings().cors_origins,
+                [
+                    "http://localhost:5173",
+                    "http://127.0.0.1:5173",
+                    "http://portal.la-coruna.xyz",
+                ],
+            )
+        get_settings.cache_clear()
 
     @patch("app.k8s_client.client.NetworkingV1Api")
     @patch("app.k8s_client.load_kube_config")
