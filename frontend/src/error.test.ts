@@ -26,6 +26,19 @@ describe('normalizeApiError', () => {
     expect(error.detail).toBe('Delete an old demo project before creating another one.')
   })
 
+  it('does not duplicate custom backend detail when it matches the message', () => {
+    const error = normalizeApiError(axiosError(409, {
+      error: {
+        code: 'DEMO_REPLICA_LIMIT',
+        message: 'Demo mode replicas cannot exceed 1',
+        detail: 'Demo mode replicas cannot exceed 1',
+      },
+    }))
+
+    expect(error.message).toBe('Demo mode replicas cannot exceed 1')
+    expect(error.detail).toBeUndefined()
+  })
+
   it('converts FastAPI validation details to field errors', () => {
     const error = normalizeApiError(axiosError(422, {
       detail: [
@@ -38,6 +51,15 @@ describe('normalizeApiError', () => {
       'replicas: Input should be less than or equal to 1',
       'image: Image is not allowed',
     ])
+  })
+
+  it('does not duplicate FastAPI detail strings', () => {
+    const error = normalizeApiError(axiosError(400, {
+      detail: 'Demo mode replicas cannot exceed 1',
+    }))
+
+    expect(error.message).toBe('Demo mode replicas cannot exceed 1')
+    expect(error.detail).toBeUndefined()
   })
 
   it('returns a friendly message for network errors', () => {

@@ -20,6 +20,11 @@ function toText(value: unknown): string | undefined {
   return undefined
 }
 
+function detailIfDifferent(message: string, detail: unknown): string | undefined {
+  const detailText = toText(detail)
+  return detailText && detailText !== message ? detailText : undefined
+}
+
 function toFieldErrors(detail: unknown): string[] {
   if (!Array.isArray(detail)) return []
 
@@ -58,11 +63,13 @@ export function normalizeApiError(error: unknown): NormalizedApiError {
 
   if (data && typeof data === 'object' && 'error' in data) {
     const payload = data as { error?: { code?: string; message?: string; detail?: unknown } }
+    const message = payload.error?.message ?? '\ubc31\uc5d4\ub4dc\uac00 \uc694\uccad\uc744 \uac70\ubd80\ud588\uc2b5\ub2c8\ub2e4.'
+
     return {
       title,
       code: payload.error?.code,
-      message: payload.error?.message ?? '\ubc31\uc5d4\ub4dc\uac00 \uc694\uccad\uc744 \uac70\ubd80\ud588\uc2b5\ub2c8\ub2e4.',
-      detail: toText(payload.error?.detail),
+      message,
+      detail: detailIfDifferent(message, payload.error?.detail),
       fieldErrors: [],
     }
   }
@@ -70,13 +77,14 @@ export function normalizeApiError(error: unknown): NormalizedApiError {
   if (data && typeof data === 'object' && 'detail' in data) {
     const payload = data as { detail?: unknown }
     const fieldErrors = toFieldErrors(payload.detail)
+    const message = fieldErrors.length > 0
+      ? '\uc785\ub825 \ud544\ub4dc\uc5d0 \uc218\uc815\uc774 \ud544\uc694\ud55c \uac12\uc774 \uc788\uc2b5\ub2c8\ub2e4.'
+      : toText(payload.detail) ?? '\ubc31\uc5d4\ub4dc\uac00 \uc694\uccad\uc744 \uac70\ubd80\ud588\uc2b5\ub2c8\ub2e4.'
 
     return {
       title,
-      message: fieldErrors.length > 0
-        ? '\uc785\ub825 \ud544\ub4dc\uc5d0 \uc218\uc815\uc774 \ud544\uc694\ud55c \uac12\uc774 \uc788\uc2b5\ub2c8\ub2e4.'
-        : toText(payload.detail) ?? '\ubc31\uc5d4\ub4dc\uac00 \uc694\uccad\uc744 \uac70\ubd80\ud588\uc2b5\ub2c8\ub2e4.',
-      detail: fieldErrors.length > 0 ? undefined : toText(payload.detail),
+      message,
+      detail: fieldErrors.length > 0 ? undefined : detailIfDifferent(message, payload.detail),
       fieldErrors,
     }
   }

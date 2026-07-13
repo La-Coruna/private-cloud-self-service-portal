@@ -117,7 +117,7 @@ describe('project dashboard routes', () => {
       message: 'Request failed',
       response: {
         status: 409,
-        data: { detail: 'Only 3 active demo projects are allowed.' },
+        data: { detail: 'Demo mode replicas cannot exceed 1' },
       },
     })
     renderApp('/projects/new')
@@ -125,7 +125,8 @@ describe('project dashboard routes', () => {
     await user.type(screen.getByLabelText(/Service name/i), 'demo-limit')
     await user.click(screen.getByRole('button', { name: '\uc0dd\uc131' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Only 3 active demo projects are allowed.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Demo mode replicas cannot exceed 1')
+    expect(screen.getAllByText('Demo mode replicas cannot exceed 1')).toHaveLength(1)
     expect(screen.getByRole('alert')).toHaveTextContent('\ud504\ub85c\uc81d\ud2b8\ub97c \uc0dd\uc131\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4')
   })
 
