@@ -87,10 +87,44 @@ describe('project dashboard routes', () => {
     expect(await screen.findByText('demo-api')).toBeInTheDocument()
     expect(screen.getByText('RUNNING')).toBeInTheDocument()
     expect(screen.getByText('demo-api-staging.localtest.me')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /새 프로젝트/i })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: '\uc0c8 \ud504\ub85c\uc81d\ud2b8' })).toHaveAttribute(
       'href',
       '/projects/new',
     )
+  })
+
+
+  it('shows demo input rules on the new project page', async () => {
+    const user = userEvent.setup()
+    renderApp('/projects/new')
+
+    const toggle = screen.getByRole('button', { name: '\uc785\ub825 \uaddc\uce59 \ubcf4\uae30' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await user.click(toggle)
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('\uacf5\uac1c \ub370\ubaa8 \uc785\ub825 \uaddc\uce59')).toBeInTheDocument()
+    expect(screen.getAllByText(/nginx:latest, httpd:alpine/).length).toBeGreaterThan(0)
+  })
+
+  it('renders backend create errors on the new project page', async () => {
+    const user = userEvent.setup()
+    apiMocks.createProject.mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'Request failed',
+      response: {
+        status: 409,
+        data: { detail: 'Only 3 active demo projects are allowed.' },
+      },
+    })
+    renderApp('/projects/new')
+
+    await user.type(screen.getByLabelText(/Service name/i), 'demo-limit')
+    await user.click(screen.getByRole('button', { name: '\uc0dd\uc131' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Only 3 active demo projects are allowed.')
+    expect(screen.getByRole('alert')).toHaveTextContent('\ud504\ub85c\uc81d\ud2b8\ub97c \uc0dd\uc131\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4')
   })
 
   it('syncs project status from the detail page', async () => {
@@ -98,7 +132,7 @@ describe('project dashboard routes', () => {
     renderApp('/projects/1')
 
     expect(await screen.findByRole('heading', { name: 'demo-api' })).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /상태 새로고침/i }))
+    await user.click(screen.getByRole('button', { name: /Refresh status/i }))
 
     await waitFor(() => expect(apiMocks.syncProjectStatus).toHaveBeenCalledWith(1))
   })

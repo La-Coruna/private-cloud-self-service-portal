@@ -1,5 +1,8 @@
 import type { ReactNode } from 'react'
 
+import { ErrorCard } from './ErrorCard'
+import { normalizeApiError } from '../lib/error'
+
 interface QueryStateProps {
   isLoading: boolean
   isError: boolean
@@ -8,10 +11,7 @@ interface QueryStateProps {
 }
 
 export function QueryState({ isLoading, isError, error, children }: QueryStateProps) {
-  if (isLoading) return <div className="notice">불러오는 중입니다.</div>
-  if (isError) {
-    const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.'
-    return <div className="notice error">{message}</div>
-  }
+  if (isLoading) return <div className="notice">Loading data.</div>
+  if (isError) return <ErrorCard error={normalizeApiError(error)} />
   return <>{children}</>
 }

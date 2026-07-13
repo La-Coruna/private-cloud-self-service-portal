@@ -286,6 +286,12 @@ Important safety defaults:
 - generated namespaces are prefixed with `demo-`
 - no GCP credentials, service account keys, kubeconfig, or real `.env` values are committed
 
+Public demo UX notes:
+
+- the browser tab title clearly identifies the platform demo
+- the create-project form shows demo input rules before submission
+- backend `400`, `409`, and `422` responses are surfaced in the React UI so reviewers can see why a request was rejected
+
 Deployment verification completed on GKE Autopilot:
 
 - `portal-backend`, `portal-frontend`, and `portal-mariadb` are running in `portal-system`

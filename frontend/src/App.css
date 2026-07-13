@@ -318,3 +318,73 @@ select {
     grid-template-columns: 1fr;
   }
 }
+.help-button {
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.demo-rules-panel {
+  background: #f7fbff;
+  border: 1px solid #bdd7ee;
+  border-radius: 8px;
+  color: #22313f;
+  margin-bottom: 16px;
+  padding: 16px 18px;
+}
+
+.demo-rules-panel strong {
+  display: block;
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+
+.demo-rules-panel ul,
+.field-error-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.demo-rules-panel li,
+.field-error-list li {
+  line-height: 1.55;
+  margin: 4px 0;
+}
+
+.field-hint {
+  color: #667789;
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.error-card {
+  background: #fff1f0;
+  border: 1px solid #ffb4aa;
+  border-radius: 8px;
+  color: #7f1d1d;
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.error-card-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.error-code {
+  background: #ffffff;
+  border: 1px solid #ffb4aa;
+  border-radius: 999px;
+  color: #9f1d13;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 7px;
+}
+
+.error-card p {
+  line-height: 1.5;
+}

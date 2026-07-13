@@ -141,6 +141,13 @@ Custom domain values used by the live demo:
 
 The current public demo uses HTTP only. HTTPS can be added later with Google-managed certificates or cert-manager. If the GKE Load Balancer IP changes, update the DNS A records.
 
+Frontend demo UX details:
+
+- build the frontend with `VITE_API_BASE_URL=http://portal.la-coruna.xyz` for the domain deployment
+- the create form includes visible demo guardrail guidance for allowed prefixes, images, replicas, and generated app hosts
+- project creation failures display backend error details instead of a generic failure message
+- the browser tab title identifies the Kubernetes application deployment and operations platform demo
+
 Legacy note: GKE `gce` Ingress creates separate Load Balancers for app Ingress resources. New app Ingress resources now use `ingressClassName=nginx` and route through the shared ingress-nginx controller.
 ## Shared App Ingress
 

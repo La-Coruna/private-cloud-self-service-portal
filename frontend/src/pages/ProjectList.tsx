@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
-import { StatusBadge } from '../components/StatusBadge'
 import { QueryState } from '../components/QueryState'
+import { StatusBadge } from '../components/StatusBadge'
 import { getProjects } from '../lib/api'
 import { formatDateTime, textOrDash } from '../lib/format'
 
@@ -15,14 +15,14 @@ export function ProjectListPage() {
       <div className="section-heading">
         <div>
           <p className="eyebrow">Projects</p>
-          <h1>프로젝트 목록</h1>
+          <h1>{'\ud504\ub85c\uc81d\ud2b8 \ubaa9\ub85d'}</h1>
         </div>
-        <Link className="primary-action" to="/projects/new">새 프로젝트</Link>
+        <Link className="primary-action" to="/projects/new">{'\uc0c8 \ud504\ub85c\uc81d\ud2b8'}</Link>
       </div>
 
       <QueryState isLoading={projectsQuery.isLoading} isError={projectsQuery.isError} error={projectsQuery.error}>
         {projects.length === 0 ? (
-          <div className="notice">아직 생성된 프로젝트가 없습니다.</div>
+          <div className="notice">{'\uc544\uc9c1 \uc0dd\uc131\ub41c \ud504\ub85c\uc81d\ud2b8\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.'}</div>
         ) : (
           <div className="table-wrap">
             <table>
