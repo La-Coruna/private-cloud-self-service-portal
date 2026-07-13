@@ -87,6 +87,8 @@ describe('project dashboard routes', () => {
     expect(await screen.findByText('demo-api')).toBeInTheDocument()
     expect(screen.getByText('RUNNING')).toBeInTheDocument()
     expect(screen.getByText('demo-api-staging.localtest.me')).toBeInTheDocument()
+    expect(screen.getByText('Created at (KST)')).toBeInTheDocument()
+    expect(screen.getByText(/KST$/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '\uc0c8 \ud504\ub85c\uc81d\ud2b8' })).toHaveAttribute(
       'href',
       '/projects/new',

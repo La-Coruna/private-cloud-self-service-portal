@@ -4,7 +4,8 @@ import { Link } from 'react-router-dom'
 import { QueryState } from '../components/QueryState'
 import { StatusBadge } from '../components/StatusBadge'
 import { getProjects } from '../lib/api'
-import { formatDateTime, textOrDash } from '../lib/format'
+import { formatKstDateTimeWithLabel } from '../lib/date'
+import { textOrDash } from '../lib/format'
 
 export function ProjectListPage() {
   const projectsQuery = useQuery({ queryKey: ['projects'], queryFn: getProjects })
@@ -35,7 +36,7 @@ export function ProjectListPage() {
                   <th>status</th>
                   <th>external</th>
                   <th>ingress</th>
-                  <th>created</th>
+                  <th>Created at (KST)</th>
                 </tr>
               </thead>
               <tbody>
@@ -48,7 +49,7 @@ export function ProjectListPage() {
                     <td><StatusBadge status={project.status} /></td>
                     <td>{project.expose_external ? 'yes' : 'no'}</td>
                     <td className="mono">{textOrDash(project.ingress_host)}</td>
-                    <td>{formatDateTime(project.created_at)}</td>
+                    <td>{formatKstDateTimeWithLabel(project.created_at)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -4,7 +4,8 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { QueryState } from '../components/QueryState'
 import { StatusBadge } from '../components/StatusBadge'
 import { deleteProject, getAuditLogs, getEvents, getPods, getProject, syncProjectStatus } from '../lib/api'
-import { formatDateTime, textOrDash } from '../lib/format'
+import { formatKstDateTimeWithLabel } from '../lib/date'
+import { textOrDash } from '../lib/format'
 
 export function ProjectDetailPage() {
   const { id } = useParams()
@@ -73,6 +74,8 @@ export function ProjectDetailPage() {
               <div><span>Ingress</span><strong className="mono">{textOrDash(projectQuery.data.ingress_host)}</strong></div>
               <div><span>Replicas</span><strong>{projectQuery.data.replicas}</strong></div>
               <div><span>Resources</span><strong>{projectQuery.data.cpu_request}/{projectQuery.data.cpu_limit}, {projectQuery.data.memory_request}/{projectQuery.data.memory_limit}</strong></div>
+              <div><span>Created at (KST)</span><strong>{formatKstDateTimeWithLabel(projectQuery.data.created_at)}</strong></div>
+              <div><span>Updated at (KST)</span><strong>{formatKstDateTimeWithLabel(projectQuery.data.updated_at)}</strong></div>
             </div>
             {projectQuery.data.error_message && <div className="notice error">{projectQuery.data.error_message}</div>}
           </>
@@ -84,8 +87,8 @@ export function ProjectDetailPage() {
           <h2>Pod status</h2>
           <QueryState isLoading={podsQuery.isLoading} isError={podsQuery.isError} error={podsQuery.error}>
             {(podsQuery.data ?? []).length === 0 ? <div className="notice">No Pod data.</div> : (
-              <div className="table-wrap compact"><table><thead><tr><th>name</th><th>phase</th><th>node</th><th>containers</th></tr></thead><tbody>
-                {(podsQuery.data ?? []).map((pod) => <tr key={pod.name}><td className="mono">{pod.name}</td><td>{pod.phase}</td><td>{textOrDash(pod.node_name)}</td><td>{pod.containers.map((container) => `${container.name}:${container.state}${container.reason ? `(${container.reason})` : ''}`).join(', ')}</td></tr>)}
+              <div className="table-wrap compact"><table><thead><tr><th>name</th><th>phase</th><th>node</th><th>Started at (KST)</th><th>containers</th></tr></thead><tbody>
+                {(podsQuery.data ?? []).map((pod) => <tr key={pod.name}><td className="mono">{pod.name}</td><td>{pod.phase}</td><td>{textOrDash(pod.node_name)}</td><td>{formatKstDateTimeWithLabel(pod.start_time)}</td><td>{pod.containers.map((container) => `${container.name}:${container.state}${container.reason ? `(${container.reason})` : ''}`).join(', ')}</td></tr>)}
               </tbody></table></div>
             )}
           </QueryState>
@@ -95,8 +98,8 @@ export function ProjectDetailPage() {
           <h2>Kubernetes Event</h2>
           <QueryState isLoading={eventsQuery.isLoading} isError={eventsQuery.isError} error={eventsQuery.error}>
             {(eventsQuery.data ?? []).length === 0 ? <div className="notice">No Event data.</div> : (
-              <div className="table-wrap compact"><table><thead><tr><th>reason</th><th>object</th><th>message</th><th>time</th></tr></thead><tbody>
-                {(eventsQuery.data ?? []).map((event, index) => <tr key={`${event.reason}-${index}`}><td>{textOrDash(event.reason)}</td><td className="mono">{textOrDash(event.involved_object_name)}</td><td>{textOrDash(event.message)}</td><td>{formatDateTime(event.last_timestamp ?? event.event_time ?? event.first_timestamp)}</td></tr>)}
+              <div className="table-wrap compact"><table><thead><tr><th>reason</th><th>object</th><th>message</th><th>Time (KST)</th></tr></thead><tbody>
+                {(eventsQuery.data ?? []).map((event, index) => <tr key={`${event.reason}-${index}`}><td>{textOrDash(event.reason)}</td><td className="mono">{textOrDash(event.involved_object_name)}</td><td>{textOrDash(event.message)}</td><td>{formatKstDateTimeWithLabel(event.last_timestamp ?? event.event_time ?? event.first_timestamp)}</td></tr>)}
               </tbody></table></div>
             )}
           </QueryState>
@@ -108,7 +111,7 @@ export function ProjectDetailPage() {
         <QueryState isLoading={auditsQuery.isLoading} isError={auditsQuery.isError} error={auditsQuery.error}>
           {(auditsQuery.data ?? []).length === 0 ? <div className="notice">No Audit Log data.</div> : (
             <div className="timeline">
-              {(auditsQuery.data ?? []).map((log) => <div className="timeline-row" key={log.id}><time>{formatDateTime(log.created_at)}</time><strong>{log.action}</strong><span>{log.status}</span><p>{textOrDash(log.message)}</p></div>)}
+              {(auditsQuery.data ?? []).map((log) => <div className="timeline-row" key={log.id}><time>{formatKstDateTimeWithLabel(log.created_at)}</time><strong>{log.action}</strong><span>{log.status}</span><p>{textOrDash(log.message)}</p></div>)}
             </div>
           )}
         </QueryState>

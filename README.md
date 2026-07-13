@@ -291,6 +291,7 @@ Public demo UX notes:
 - the browser tab title clearly identifies the platform demo
 - the create-project form shows demo input rules before submission
 - backend `400`, `409`, and `422` responses are surfaced in the React UI so reviewers can see why a request was rejected
+- Frontend displays timestamps in KST for the public demo.
 
 Deployment verification completed on GKE Autopilot:
 
