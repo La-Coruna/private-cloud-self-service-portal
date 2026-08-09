@@ -3,11 +3,11 @@ kind: Ingress
 metadata:
   name: portal-demo
   namespace: portal-system
-  annotations:
-    kubernetes.io/ingress.class: gce
 spec:
+  ingressClassName: nginx
   rules:
-    - http:
+    - host: portal.la-coruna.xyz
+      http:
         paths:
           - path: /api
             pathType: Prefix
@@ -17,7 +17,7 @@ spec:
                 port:
                   number: 8000
           - path: /health
-            pathType: Exact
+            pathType: Prefix
             backend:
               service:
                 name: portal-backend
