@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,8 @@ class Settings(BaseSettings):
     db_name: str = "portal_db"
     db_user: str = "portal_user"
     db_password: str = "portal_pass"
+    db_startup_max_attempts: int = Field(default=60, ge=1)
+    db_startup_retry_delay_seconds: float = Field(default=5.0, ge=0)
 
     kube_context: str = "kind-portal-dev"
 
