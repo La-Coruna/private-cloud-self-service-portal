@@ -1,4 +1,6 @@
 import copy
+import importlib
+import sys
 import unittest
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -10,7 +12,6 @@ from app.repositories import (
     ProjectAlreadyExists,
     ProjectNotFound,
 )
-from app.repositories.firestore import FirestoreProjectRepository
 
 
 class FakeDocumentSnapshot:
@@ -29,6 +30,12 @@ class FakeDocumentSnapshot:
         return copy.deepcopy(self._data) if self.exists else None
 
 
+def require_string_path_element(value):
+    if not isinstance(value, str):
+        raise TypeError("Firestore path elements must be strings")
+    return value
+
+
 class FakeDocumentReference:
     def __init__(self, client, path):
         self._client = client
@@ -36,10 +43,19 @@ class FakeDocumentReference:
         self.id = path.rsplit("/", 1)[-1]
 
     def collection(self, collection_id):
-        return FakeCollectionReference(self._client, f"{self.path}/{collection_id}")
+        return FakeCollectionReference(
+            self._client,
+            f"{self.path}/{require_string_path_element(collection_id)}",
+        )
 
     def get(self, transaction=None):
-        del transaction
+        active_transaction = self._client._active_transaction
+        if active_transaction is not None and transaction is not active_transaction:
+            raise AssertionError("transactional reads must use the active transaction")
+        if transaction is not None:
+            if transaction is not active_transaction:
+                raise AssertionError("transaction is not active")
+            transaction.read_paths.append(self.path)
         return FakeDocumentSnapshot(self, self._client._documents.get(self.path))
 
     def set(self, document_data, merge=False):
@@ -52,7 +68,10 @@ class FakeCollectionReference:
         self.path = path
 
     def document(self, document_id):
-        return FakeDocumentReference(self._client, f"{self.path}/{document_id}")
+        return FakeDocumentReference(
+            self._client,
+            f"{self.path}/{require_string_path_element(document_id)}",
+        )
 
     def stream(self):
         prefix = f"{self.path}/"
@@ -72,39 +91,56 @@ class FakeTransaction:
         self._max_attempts = 1
         self._read_only = False
         self._id = None
+        self.read_paths = []
+        self.write_paths = []
 
     def _clean_up(self):
         self._writes.clear()
+        self.read_paths.clear()
+        self.write_paths.clear()
         self._id = None
 
     def _begin(self, retry_id=None):
         del retry_id
         self._id = b"fake-transaction"
 
+        self._client._active_transaction = self
+
     def set(self, reference, document_data, merge=False):
         self._writes.append((reference.path, copy.deepcopy(document_data), merge))
+
+        self.write_paths.append(reference.path)
 
     def _commit(self):
         for path, document_data, merge in self._writes:
             self._client._set(path, document_data, merge=merge)
         self._writes.clear()
 
+        self._client._active_transaction = None
+
     def _rollback(self):
         self._writes.clear()
+
+        self._client._active_transaction = None
 
 
 class FakeFirestoreClient:
     def __init__(self):
         self._documents = {}
 
+        self._active_transaction = None
+        self.transactions = []
     def collection(self, collection_id):
-        return FakeCollectionReference(self, collection_id)
+
+        return FakeCollectionReference(self, require_string_path_element(collection_id))
 
     def document(self, document_path):
-        return FakeDocumentReference(self, document_path)
+        return FakeDocumentReference(self, require_string_path_element(document_path))
 
     def transaction(self):
-        return FakeTransaction(self)
+        transaction = FakeTransaction(self)
+        self.transactions.append(transaction)
+        return transaction
 
     def _set(self, path, document_data, merge=False):
         if merge and path in self._documents:
@@ -115,11 +151,12 @@ class FakeFirestoreClient:
             self._documents[path] = copy.deepcopy(document_data)
 
 
-def make_project(project_id="demo-api-staging", *, created_at=None):
+def make_project(project_id="demo-api-staging", *, namespace=None, created_at=None):
     created_at = created_at or datetime(2026, 8, 12, 9, 30, 0)
+    namespace = namespace or project_id
     return Project(
         id=project_id,
-        namespace=project_id,
+        namespace=namespace,
         service_name="demo-api",
         environment="staging",
         image="nginx:1.27",
@@ -157,6 +194,8 @@ class FirestoreSettingsTests(unittest.TestCase):
             {"APP_ENV": "testing", "REPOSITORY_BACKEND": "memory"},
             clear=True,
         ):
+            sys.modules.pop("app.repositories.firestore", None)
+            firestore_repository = importlib.import_module("app.repositories.firestore")
             settings = Settings(_env_file=None)
 
         self.assertEqual(settings.app_env, "testing")
@@ -164,19 +203,25 @@ class FirestoreSettingsTests(unittest.TestCase):
         self.assertEqual(settings.firestore_project_id, "")
         self.assertEqual(settings.firestore_database, "(default)")
         client.assert_not_called()
+        self.assertTrue(hasattr(firestore_repository, "FirestoreProjectRepository"))
 
 
 class FirestoreProjectRepositoryTests(unittest.TestCase):
     def setUp(self):
+        from app.repositories.firestore import FirestoreProjectRepository
         self.client = FakeFirestoreClient()
         self.repository = FirestoreProjectRepository(
             client=self.client,
             max_active_projects=3,
+
         )
 
     def active_count(self):
         snapshot = self.client.document("system/demoCapacity").get()
         return snapshot.get("active_count") if snapshot.exists else 0
+    def test_fake_rejects_non_string_document_ids(self):
+        with self.assertRaises(TypeError):
+            self.client.collection("projects").document(7)
 
     def test_project_round_trip_preserves_status_and_utc_timestamps(self):
         project = make_project()
@@ -192,14 +237,59 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
         self.assertEqual(stored["updated_at"].tzinfo, UTC)
         self.assertEqual(self.repository.list_projects(), [project])
 
+    def test_project_documents_are_keyed_by_namespace(self):
+        project = make_project(
+            "legacy-row-id",
+            namespace="demo-api-staging",
+        )
+
+        self.repository.save_project(project)
+
+        self.assertFalse(self.client.document("projects/legacy-row-id").get().exists)
+        self.assertTrue(self.client.document("projects/demo-api-staging").get().exists)
+        self.assertEqual(self.repository.get_project("demo-api-staging"), project)
+
+    def test_claim_and_release_use_namespace_identity(self):
+        project = make_project(
+            "legacy-row-id",
+            namespace="demo-api-staging",
+        )
+
+        claimed = self.repository.claim_capacity_and_create(project)
+
+        self.assertTrue(claimed.capacity_claimed)
+        self.assertFalse(self.client.document("projects/legacy-row-id").get().exists)
+        self.assertTrue(self.client.document("projects/demo-api-staging").get().exists)
+        released = self.repository.release_capacity(project.namespace)
+
+        self.assertFalse(released.capacity_claimed)
+
+
     def test_claim_transaction_rejects_duplicate_document(self):
         project = make_project()
+
         self.repository.claim_capacity_and_create(project)
 
         with self.assertRaises(ProjectAlreadyExists):
             self.repository.claim_capacity_and_create(project)
 
         self.assertEqual(self.active_count(), 1)
+
+    def test_claim_reads_and_writes_use_the_same_transaction(self):
+        project = make_project()
+
+        self.repository.claim_capacity_and_create(project)
+
+        transactions = self.client.transactions
+        self.assertEqual(len(transactions), 1)
+        self.assertEqual(
+            transactions[0].read_paths,
+            [f"projects/{project.namespace}", "system/demoCapacity"],
+        )
+        self.assertEqual(
+            transactions[0].write_paths,
+            [f"projects/{project.namespace}", "system/demoCapacity"],
+        )
 
     def test_claim_transaction_rejects_fourth_active_project(self):
         self.client.document("system/demoCapacity").set(
@@ -216,14 +306,16 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
     def test_release_transaction_decrements_only_when_claimed(self):
         project = make_project()
         self.repository.claim_capacity_and_create(project)
-        self.assertEqual(self.active_count(), 1)
+        self.repository.claim_capacity_and_create(make_project("demo-worker-staging"))
+        self.assertEqual(self.active_count(), 2)
 
         first_release = self.repository.release_capacity(project.id)
+        self.assertEqual(self.active_count(), 1)
         second_release = self.repository.release_capacity(project.id)
 
         self.assertFalse(first_release.capacity_claimed)
         self.assertFalse(second_release.capacity_claimed)
-        self.assertEqual(self.active_count(), 0)
+        self.assertEqual(self.active_count(), 1)
 
     def test_release_transaction_rejects_unknown_project(self):
         with self.assertRaises(ProjectNotFound):
