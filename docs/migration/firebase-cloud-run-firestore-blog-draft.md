@@ -42,6 +42,14 @@ For fast development, `REPOSITORY_BACKEND=memory` keeps unit work self-contained
 
 MariaDB documentation is retained only as legacy architecture and rollback history. It is not a required dependency for the serverless application path.
 
+## The application checkpoint caught a Cloud Run port mismatch
+
+The final local checkpoint deliberately rebuilt the backend image and launched it with the same port contract Cloud Run supplies. One preliminary backend test command failed before reaching any tests because it was invoked from the repository root while the application package is rooted under `backend`. Running the suite from the correct working directory passed all 82 tests, which separated a command-context error from an application defect without changing source code.
+
+The container check found a real defect. Although the environment contained `PORT=8080` and Docker published host port 8080 to container port 8080, the image command still forced Uvicorn to listen on 8000. The first `/health` call therefore returned an empty response, and the container log exposed the mismatch directly. Commit `99c460c` changed only the container contract: the image now exposes 8080 and starts Uvicorn with `${PORT:-8080}`.
+
+After rebuilding `portal-backend:firestore-local`, the log showed Uvicorn listening on `0.0.0.0:8080` and `/health` returned HTTP 200. The aggregate payload was `degraded`, not `ok`, for an intentional reason: the memory repository was healthy, while GKE was `UNAVAILABLE` because the isolated container had no local kubeconfig. That result demonstrated the designed separation between durable portal health and live platform availability. A fresh post-fix run then passed 82 backend tests, backend compilation, 24 frontend tests, lint, and the production frontend build. This remained entirely local; no cloud API, IAM binding, DNS record, database, or deployment was changed.
+
 ## Rollback remains a first-class phase
 
 The cutover plan does not treat a green local emulator as permission to destroy the old platform. The legacy GKE portal, MariaDB workload, and persistent storage remain available during a parallel observation period. Before changing a custom domain, operators record the current DNS target in a private operational record. If acceptance fails, traffic returns to that recorded target and the old health path is rechecked.
@@ -50,6 +58,6 @@ Removal is deliberately split into later approvals. Stateless legacy portal comp
 
 ## What is verified, and what is still ahead
 
-Verified locally: frontend unit tests, memory-backed backend behavior, Firestore transaction retry configuration, concurrent demo-capacity enforcement, persistence across repository reconstruction, audit ordering, and Firebase emulator/Hosting configuration.
+Verified locally: frontend unit tests and production build, memory-backed backend behavior, Firestore transaction retry configuration, concurrent demo-capacity enforcement, persistence across repository reconstruction, audit ordering, Firebase emulator/Hosting configuration, and the backend container's `$PORT=8080` health contract.
 
-Still gated: Cloud Run container and IAM behavior, Firestore location and production access, GKE DNS endpoint authentication, Firebase-to-Cloud-Run routing, custom-domain TLS, 24-hour observation, cleanup, and measured cost results. Those facts should be added only after their respective commands have run and their evidence has been recorded.
+Still gated: deployed Cloud Run runtime and IAM behavior, Firestore location and production access, GKE DNS endpoint authentication, Firebase-to-Cloud-Run routing, custom-domain TLS, 24-hour observation, cleanup, and measured cost results. Those facts should be added only after their respective commands have run and their evidence has been recorded.
