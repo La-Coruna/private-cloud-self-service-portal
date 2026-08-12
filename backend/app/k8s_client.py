@@ -3,6 +3,7 @@ from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
 from app.config import get_settings
+from app.k8s_auth import build_api_client
 
 
 MANAGED_BY = "self-service-portal"
@@ -18,10 +19,14 @@ DEFAULT_RESOURCE_QUOTA_HARD = {
 
 def load_kube_config() -> None:
     settings = get_settings()
-    if settings.kube_context:
-        config.load_kube_config(context=settings.kube_context)
+    if getattr(settings, "kube_auth_mode", "local") == "local":
+        if settings.kube_context:
+            config.load_kube_config(context=settings.kube_context)
+            return
+        config.load_incluster_config()
         return
-    config.load_incluster_config()
+    api_client = build_api_client(settings)
+    client.Configuration.set_default(api_client.configuration)
 
 
 def build_common_labels(project_id: int, service_name: str, environment: str) -> dict[str, str]:

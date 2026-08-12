@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     db_startup_retry_delay_seconds: float = Field(default=5.0, ge=0)
 
     kube_context: str = "kind-portal-dev"
+    kube_auth_mode: Literal["local", "gke"] = "local"
+    gke_cluster_location: str = ""
+    gke_cluster_name: str = ""
+    gke_dns_endpoint: str = ""
 
     demo_mode: bool = False
     demo_max_projects: int = 3
