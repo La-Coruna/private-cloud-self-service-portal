@@ -70,7 +70,7 @@ class ProjectApiTests(unittest.TestCase):
         self.platform_status = MagicMock()
         self.platform_status.get_status.return_value = make_platform_status(
             PlatformAvailability.UNAVAILABLE,
-            message="Kubernetes API connection failed",
+            message="Kubernetes API is temporarily unavailable",
         )
         self.project_service = ProjectService(
             repository=self.repository,
@@ -125,6 +125,33 @@ class ProjectApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), GKE_ERROR)
+
+    def test_pod_gateway_failure_uses_sanitized_gke_contract(self) -> None:
+        self.platform_status.get_status.return_value = make_platform_status(
+            PlatformAvailability.AVAILABLE,
+            message="Platform has 1 Ready schedulable node(s)",
+        )
+        self.kubernetes.list_project_pods.side_effect = ConnectionError(
+            "private-cluster.example:443 refused"
+        )
+
+        response = self.client.get("/api/projects/demo-api-staging/pods")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), GKE_ERROR)
+        self.assertNotIn("private-cluster.example", response.text)
+
+    def test_unexpected_pod_programming_error_surfaces(self) -> None:
+        self.platform_status.get_status.return_value = make_platform_status(
+            PlatformAvailability.AVAILABLE,
+            message="Platform has 1 Ready schedulable node(s)",
+        )
+        self.kubernetes.list_project_pods.side_effect = ValueError(
+            "programming defect"
+        )
+
+        with self.assertRaisesRegex(ValueError, "programming defect"):
+            self.client.get("/api/projects/demo-api-staging/pods")
 
     def test_pod_read_uses_service_gateway_with_string_namespace_id(self) -> None:
         self.platform_status.get_status.return_value = make_platform_status(
@@ -228,6 +255,11 @@ class ProjectApiTests(unittest.TestCase):
             response.json()["dependencies"]["firestore"]["status"],
             "error",
         )
+        self.assertEqual(
+            response.json()["dependencies"]["firestore"]["message"],
+            "Firestore is temporarily unavailable",
+        )
+        self.assertNotIn("Firestore read timed out", response.text)
         self.assertEqual(
             response.json()["dependencies"]["gke"]["status"], "UNAVAILABLE"
         )

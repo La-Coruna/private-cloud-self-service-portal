@@ -17,7 +17,7 @@ class ProjectNotFound(Exception):
 
 
 class InMemoryProjectRepository:
-    def __init__(self, max_active_projects: int) -> None:
+    def __init__(self, max_active_projects: int | None) -> None:
         self._max_active_projects = max_active_projects
         self._projects: dict[str, Project] = {}
         self._audit_logs: dict[str, list[AuditLog]] = {}
@@ -32,7 +32,10 @@ class InMemoryProjectRepository:
         with self._lock:
             if project.id in self._projects:
                 raise ProjectAlreadyExists(project.id)
-            if self.active_count >= self._max_active_projects:
+            if (
+                self._max_active_projects is not None
+                and self.active_count >= self._max_active_projects
+            ):
                 raise DemoCapacityExceeded()
 
             created_project = replace(project, capacity_claimed=True)

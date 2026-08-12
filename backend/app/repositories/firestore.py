@@ -96,7 +96,7 @@ def _claim(transaction, project_ref, capacity_ref, project_data, max_active):
 
     capacity_snapshot = capacity_ref.get(transaction=transaction)
     active = capacity_snapshot.get("active_count") if capacity_snapshot.exists else 0
-    if active >= max_active:
+    if max_active is not None and active >= max_active:
         raise DemoCapacityExceeded(max_active)
 
     transaction.set(project_ref, project_data)
@@ -141,7 +141,7 @@ class FirestoreProjectRepository:
     def __init__(
         self,
         client: firestore.Client,
-        max_active_projects: int,
+        max_active_projects: int | None,
     ) -> None:
         self._client = client
         self._max_active_projects = max_active_projects

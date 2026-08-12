@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -10,6 +12,8 @@ from app.routers.projects import router as projects_router
 from app.services.platform_status import PlatformStatusService
 
 
+logger = logging.getLogger(__name__)
+FIRESTORE_UNAVAILABLE_MESSAGE = "Firestore is temporarily unavailable"
 settings = get_settings()
 
 app = FastAPI(title=settings.app_name)
@@ -48,7 +52,8 @@ def health_check(
 
     try:
         firestore_status = repository.health_check()
-    except Exception as exc:
+    except Exception:
+        logger.info("Firestore health check failed", exc_info=True)
         return JSONResponse(
             status_code=503,
             content={
@@ -56,7 +61,10 @@ def health_check(
                 "app": settings.app_name,
                 "env": settings.app_env,
                 "dependencies": {
-                    "firestore": {"status": "error", "message": str(exc)},
+                    "firestore": {
+                        "status": "error",
+                        "message": FIRESTORE_UNAVAILABLE_MESSAGE,
+                    },
                     "gke": gke_status,
                 },
             },

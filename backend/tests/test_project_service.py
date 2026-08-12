@@ -115,6 +115,40 @@ class ProjectServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_non_demo_mode_does_not_apply_demo_project_capacity_limit(self) -> None:
+        repository = InMemoryProjectRepository(max_active_projects=None)
+        service = ProjectService(
+            repository=repository,
+            kubernetes=self.kubernetes,
+            platform_status=self.platform_status,
+            settings=Settings(demo_mode=False, demo_max_projects=3),
+        )
+        self.kubernetes.create_namespace.return_value = {"status": "created"}
+        self.kubernetes.create_resource_quota.return_value = successful_result(
+            "resourcequota", "portal-resource-quota"
+        )
+        self.kubernetes.create_deployment.return_value = successful_result(
+            "deployment", "api"
+        )
+        self.kubernetes.create_service.return_value = successful_result(
+            "service", "api-svc"
+        )
+
+        projects = [
+            service.create_project(
+                ProjectCreateRequest(
+                    service_name=f"api-{index}",
+                    environment="staging",
+                    image="nginx:1.27",
+                )
+            )
+            for index in range(1, 5)
+        ]
+
+        self.assertEqual(len(projects), 4)
+        self.assertEqual(repository.active_count, 4)
+        self.assertTrue(all(project.capacity_claimed for project in projects))
+
     def test_deployment_failure_marks_failed_and_releases_capacity_once(self) -> None:
         call_order: list[str] = []
         self._configure_successful_create(call_order)
@@ -267,6 +301,52 @@ class ProjectServiceTests(unittest.TestCase):
                 "NAMESPACE_DELETED",
                 "PROJECT_DELETE_FAILED",
             ],
+        )
+
+    def test_delete_of_deleted_project_is_idempotent_without_kubernetes_calls(self) -> None:
+        project = Project.new(make_request(), "demo-demo-api-staging")
+        project.status = ProjectStatus.DELETED
+        self.repository.save_project(project)
+
+        deleted = self.service.delete_project(project.id)
+
+        self.assertEqual(deleted.status, ProjectStatus.DELETED)
+        self.assertEqual(self.kubernetes.mock_calls, [])
+        self.platform_status.get_status.assert_not_called()
+        self.assertEqual(self.repository.list_audit_logs(project.id), [])
+
+    def test_sync_ready_pods_marks_project_running(self) -> None:
+        project = Project.new(make_request(), "demo-demo-api-staging")
+        project.status = ProjectStatus.PROVISIONING
+        self.repository.save_project(project)
+        self.kubernetes.list_project_pods.return_value = [
+            {
+                "name": "demo-api-abc",
+                "phase": "Running",
+                "containers": [
+                    {
+                        "name": "demo-api",
+                        "ready": True,
+                        "state": "running",
+                        "reason": None,
+                        "message": None,
+                    }
+                ],
+            }
+        ]
+        self.kubernetes.list_project_events.return_value = []
+
+        synced = self.service.sync_status(project.id)
+
+        self.assertEqual(synced.status, ProjectStatus.RUNNING)
+        self.assertIsNone(synced.error_message)
+        self.assertEqual(
+            self.repository.get_project(project.id).status,
+            ProjectStatus.RUNNING,
+        )
+        self.assertEqual(
+            [log.action for log in self.repository.list_audit_logs(project.id)],
+            ["PROJECT_STATUS_SYNCED"],
         )
 
     def test_sync_deleted_project_is_idempotent_without_kubernetes_calls(self) -> None:

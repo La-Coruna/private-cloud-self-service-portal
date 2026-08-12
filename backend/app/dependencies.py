@@ -14,9 +14,12 @@ from app.services.platform_status import PlatformStatusService
 @lru_cache
 def get_repository() -> ProjectRepository:
     settings = get_settings()
+    max_active_projects = (
+        settings.demo_max_projects if settings.demo_mode else None
+    )
     if settings.repository_backend == "memory":
         return InMemoryProjectRepository(
-            max_active_projects=settings.demo_max_projects,
+            max_active_projects=max_active_projects,
         )
 
     client_options = {"database": settings.firestore_database}
@@ -25,7 +28,7 @@ def get_repository() -> ProjectRepository:
     client = firestore.Client(**client_options)
     return FirestoreProjectRepository(
         client=client,
-        max_active_projects=settings.demo_max_projects,
+        max_active_projects=max_active_projects,
     )
 
 

@@ -15,6 +15,7 @@ from app.k8s_auth import build_api_client
 
 
 logger = logging.getLogger(__name__)
+KUBERNETES_REQUEST_TIMEOUT = (3.05, 5.0)
 PLATFORM_UNAVAILABLE_MESSAGE = "Kubernetes API is temporarily unavailable"
 EXPECTED_PLATFORM_ERRORS = (
     GoogleAuthError,
@@ -77,9 +78,11 @@ class PlatformStatusService:
     def get_status(self) -> PlatformStatus:
         checked_at = utc_now()
         try:
-            nodes = self._get_core_v1_api().list_node()
+            nodes = self._get_core_v1_api().list_node(
+                _request_timeout=KUBERNETES_REQUEST_TIMEOUT,
+            )
         except EXPECTED_PLATFORM_ERRORS:
-            logger.warning("Kubernetes platform status check failed", exc_info=True)
+            logger.info("Kubernetes platform status check failed", exc_info=True)
             return PlatformStatus(
                 status=PlatformAvailability.UNAVAILABLE,
                 message=PLATFORM_UNAVAILABLE_MESSAGE,

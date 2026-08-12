@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -20,6 +21,7 @@ from app.schemas import (
 from app.services import GkeUnavailable, InvalidLifecycleOperation, ProjectService
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 NamespaceId = Annotated[
     str,
@@ -31,6 +33,7 @@ NamespaceId = Annotated[
 ]
 DEMO_SERVICE_PREFIXES = ("demo-", "portfolio-", "broken-")
 GKE_UNAVAILABLE_MESSAGE = "GKE 상태를 일시적으로 확인할 수 없습니다."
+GKE_UNAVAILABLE_DETAIL = "Kubernetes API connection failed"
 
 
 def _demo_allowed_images(settings) -> list[str]:
@@ -76,24 +79,17 @@ def _conflict(detail: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-def _gke_unavailable(exc: Exception) -> JSONResponse:
+def _gke_unavailable() -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content={
             "error": {
                 "code": "GKE_UNAVAILABLE",
                 "message": GKE_UNAVAILABLE_MESSAGE,
-                "detail": str(exc),
+                "detail": GKE_UNAVAILABLE_DETAIL,
             }
         },
     )
-
-
-def _existing_project(service: ProjectService, project_id: str):
-    project = service.repository.get_project(project_id)
-    if project is None:
-        raise _not_found(project_id)
-    return project
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
@@ -107,11 +103,14 @@ def create_project(
     except ProjectAlreadyExists as exc:
         raise _conflict(f"Project already exists: {exc}") from exc
     except DemoCapacityExceeded as exc:
-        raise _conflict(f"demo project limit reached: {service.settings.demo_max_projects}") from exc
+        raise _conflict(
+            f"demo project limit reached: {service.settings.demo_max_projects}"
+        ) from exc
     except InvalidLifecycleOperation as exc:
         raise _conflict(str(exc)) from exc
-    except GkeUnavailable as exc:
-        return _gke_unavailable(exc)
+    except GkeUnavailable:
+        logger.info("GKE unavailable during project creation", exc_info=True)
+        return _gke_unavailable()
 
 
 @router.get("", response_model=list[ProjectResponse])
@@ -126,17 +125,13 @@ def get_project_pods(
     project_id: NamespaceId,
     service: ProjectService = Depends(get_project_service),
 ):
-    project = _existing_project(service, project_id)
     try:
-        service._require_gke()
-        return service.kubernetes.list_project_pods(
-            namespace=project.namespace,
-            project_id=project.id,
-        )
-    except GkeUnavailable as exc:
-        return _gke_unavailable(exc)
-    except Exception as exc:
-        return _gke_unavailable(exc)
+        return service.list_pods(project_id)
+    except ProjectNotFound as exc:
+        raise _not_found(project_id) from exc
+    except GkeUnavailable:
+        logger.info("GKE unavailable during Pod read", exc_info=True)
+        return _gke_unavailable()
 
 
 @router.get("/{project_id}/events", response_model=list[ProjectEventResponse])
@@ -145,19 +140,13 @@ def get_project_events(
     limit: int = Query(default=50, ge=1, le=200),
     service: ProjectService = Depends(get_project_service),
 ):
-    project = _existing_project(service, project_id)
     try:
-        service._require_gke()
-        return service.kubernetes.list_project_events(
-            namespace=project.namespace,
-            project_id=project.id,
-            service_name=project.service_name,
-            limit=limit,
-        )
-    except GkeUnavailable as exc:
-        return _gke_unavailable(exc)
-    except Exception as exc:
-        return _gke_unavailable(exc)
+        return service.list_events(project_id, limit=limit)
+    except ProjectNotFound as exc:
+        raise _not_found(project_id) from exc
+    except GkeUnavailable:
+        logger.info("GKE unavailable during Event read", exc_info=True)
+        return _gke_unavailable()
 
 
 @router.post("/{project_id}/sync-status", response_model=ProjectResponse)
@@ -171,8 +160,9 @@ def sync_project_status(
         raise _not_found(project_id) from exc
     except InvalidLifecycleOperation as exc:
         raise _conflict(str(exc)) from exc
-    except GkeUnavailable as exc:
-        return _gke_unavailable(exc)
+    except GkeUnavailable:
+        logger.info("GKE unavailable during status sync", exc_info=True)
+        return _gke_unavailable()
 
 
 @router.delete("/{project_id}", response_model=ProjectResponse)
@@ -186,8 +176,9 @@ def delete_project(
         raise _not_found(project_id) from exc
     except InvalidLifecycleOperation as exc:
         raise _conflict(str(exc)) from exc
-    except GkeUnavailable as exc:
-        return _gke_unavailable(exc)
+    except GkeUnavailable:
+        logger.info("GKE unavailable during project deletion", exc_info=True)
+        return _gke_unavailable()
 
 
 @router.get("/{project_id}/audit-logs", response_model=list[AuditLogResponse])

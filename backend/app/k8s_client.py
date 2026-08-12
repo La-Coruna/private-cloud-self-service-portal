@@ -1,7 +1,10 @@
 from kubernetes import client, config
+from google.auth.exceptions import GoogleAuthError
 from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
+from requests.exceptions import RequestException
+from urllib3.exceptions import HTTPError
 from app.config import get_settings
 from app.k8s_auth import build_api_client
 
@@ -17,13 +20,27 @@ DEFAULT_RESOURCE_QUOTA_HARD = {
 }
 
 
+EXPECTED_KUBERNETES_ERRORS = (
+    GoogleAuthError,
+    RequestException,
+    HTTPError,
+    ApiException,
+    ConfigException,
+    ConnectionError,
+    TimeoutError,
+)
+
+
+class KubernetesUnavailableError(RuntimeError):
+    pass
+
 def load_kube_config() -> None:
     settings = get_settings()
     api_client = build_api_client(settings)
     client.Configuration.set_default(api_client.configuration)
 
 
-def build_common_labels(project_id: int, service_name: str, environment: str) -> dict[str, str]:
+def build_common_labels(project_id: str, service_name: str, environment: str) -> dict[str, str]:
     return {
         "app.kubernetes.io/managed-by": MANAGED_BY,
         "app.kubernetes.io/name": service_name,
@@ -32,7 +49,7 @@ def build_common_labels(project_id: int, service_name: str, environment: str) ->
     }
 
 
-def build_selector_labels(project_id: int, service_name: str) -> dict[str, str]:
+def build_selector_labels(project_id: str, service_name: str) -> dict[str, str]:
     return {
         "app.kubernetes.io/name": service_name,
         "platform.io/project-id": str(project_id),
@@ -112,7 +129,7 @@ def _delete_error_result(resource: str, name: str, exc: Exception) -> dict:
 
 def create_namespace(
     namespace: str,
-    project_id: int,
+    project_id: str,
     service_name: str,
     environment: str,
 ) -> dict:
@@ -141,7 +158,7 @@ def create_namespace(
 def create_resource_quota(
     *,
     namespace: str,
-    project_id: int,
+    project_id: str,
     service_name: str,
     environment: str,
 ) -> dict:
@@ -181,7 +198,7 @@ def create_resource_quota(
 def create_deployment(
     *,
     namespace: str,
-    project_id: int,
+    project_id: str,
     service_name: str,
     environment: str,
     image: str,
@@ -247,7 +264,7 @@ def create_deployment(
 def create_service(
     *,
     namespace: str,
-    project_id: int,
+    project_id: str,
     service_name: str,
     environment: str,
 ) -> dict:
@@ -297,7 +314,7 @@ def create_service(
 def create_ingress(
     *,
     namespace: str,
-    project_id: int,
+    project_id: str,
     service_name: str,
     environment: str,
     host: str,
@@ -513,7 +530,7 @@ def _format_container_status(container_status) -> dict:
     }
 
 
-def list_project_pods(namespace: str, project_id: int) -> list[dict]:
+def list_project_pods(namespace: str, project_id: str) -> list[dict]:
     try:
         load_kube_config()
         pods = client.CoreV1Api().list_namespaced_pod(
@@ -539,15 +556,13 @@ def list_project_pods(namespace: str, project_id: int) -> list[dict]:
                 }
             )
         return results
-    except ApiException as exc:
-        raise RuntimeError(f"Failed to list pods: {exc.reason}") from exc
-    except Exception as exc:
-        raise RuntimeError(str(exc)) from exc
+    except EXPECTED_KUBERNETES_ERRORS as exc:
+        raise KubernetesUnavailableError("Kubernetes pod read failed") from exc
 
 
 def list_project_events(
     namespace: str,
-    project_id: int,
+    project_id: str,
     service_name: str,
     limit: int = 50,
 ) -> list[dict]:
@@ -577,7 +592,5 @@ def list_project_events(
         ]
         project_events.sort(key=_event_sort_timestamp, reverse=True)
         return [_format_event(event) for event in project_events[:limit]]
-    except ApiException as exc:
-        raise RuntimeError(f"Kubernetes API error: {exc.reason}") from exc
-    except Exception as exc:
-        raise RuntimeError(str(exc)) from exc
+    except EXPECTED_KUBERNETES_ERRORS as exc:
+        raise KubernetesUnavailableError("Kubernetes event read failed") from exc

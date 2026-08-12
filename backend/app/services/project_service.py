@@ -4,6 +4,7 @@ from typing import Protocol
 from app.audit import create_audit_log
 from app.config import Settings
 from app.domain import PlatformAvailability, Project, ProjectStatus, utc_now
+from app.k8s_client import KubernetesUnavailableError
 from app.repositories import ProjectNotFound, ProjectRepository
 from app.schemas import ProjectCreateRequest
 
@@ -328,6 +329,30 @@ class ProjectService:
             "Project provisioning completed",
         )
         return project
+
+    def list_pods(self, project_id: str) -> list[dict]:
+        project = self._get_project(project_id)
+        self._require_gke()
+        try:
+            return self.kubernetes.list_project_pods(
+                namespace=project.namespace,
+                project_id=project.id,
+            )
+        except (KubernetesUnavailableError, ConnectionError, TimeoutError) as exc:
+            raise GkeUnavailable() from exc
+
+    def list_events(self, project_id: str, limit: int = 50) -> list[dict]:
+        project = self._get_project(project_id)
+        self._require_gke()
+        try:
+            return self.kubernetes.list_project_events(
+                namespace=project.namespace,
+                project_id=project.id,
+                service_name=project.service_name,
+                limit=limit,
+            )
+        except (KubernetesUnavailableError, ConnectionError, TimeoutError) as exc:
+            raise GkeUnavailable() from exc
 
     def sync_status(self, project_id: str) -> Project:
         project = self._get_project(project_id)

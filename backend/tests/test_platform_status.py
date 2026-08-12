@@ -48,6 +48,7 @@ class PlatformStatusServiceTests(unittest.TestCase):
         self.assertTrue(result.creation_allowed)
         self.assertIn("1", result.message)
         self.assertIsInstance(result.checked_at, datetime)
+        core_v1_api.list_node.assert_called_once_with(_request_timeout=(3.05, 5.0))
 
     def test_zero_ready_nodes_makes_platform_recovering(self) -> None:
         core_v1_api = MagicMock()
