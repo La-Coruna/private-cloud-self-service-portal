@@ -170,6 +170,36 @@ describe('project dashboard routes', () => {
     expect(screen.getByRole('button', { name: '생성' })).toBeDisabled()
   })
 
+  it('disables creation and warns when an AVAILABLE status becomes unknown after a failed poll', async () => {
+    vi.useFakeTimers()
+    apiMocks.getPlatformStatus
+      .mockResolvedValueOnce({
+        status: 'AVAILABLE',
+        message: 'GKE workload capacity is available',
+        creation_allowed: true,
+        checked_at: '2026-08-12T10:00:00',
+      })
+      .mockRejectedValueOnce(new Error('Platform status request failed'))
+
+    renderApp('/projects/new')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByRole('button', { name: '생성' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(1)
+    })
+
+    expect(screen.getByRole('button', { name: '생성' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('플랫폼 상태를 확인할 수 없습니다')
+  })
+
   it('keeps project and audit data visible when Pod data is temporarily unavailable', async () => {
     apiMocks.getPods.mockRejectedValueOnce({
       isAxiosError: true,
@@ -203,7 +233,41 @@ describe('project dashboard routes', () => {
     expect(screen.getByText(/Pod 상태를 일시적으로 확인할 수 없음/)).toBeInTheDocument()
   })
 
-  it('disables delete and sync only when the platform is unavailable', async () => {
+  it('keeps project and audit data visible when Event data is temporarily unavailable', async () => {
+    apiMocks.getEvents.mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'Request failed',
+      response: {
+        status: 503,
+        data: {
+          error: {
+            code: 'GKE_UNAVAILABLE',
+            message: 'GKE 상태를 일시적으로 확인할 수 없습니다.',
+            detail: 'Kubernetes API connection failed',
+          },
+        },
+      },
+    })
+    apiMocks.getAuditLogs.mockResolvedValueOnce([
+      {
+        id: 'audit-2',
+        project_id: 'demo-api-staging',
+        action: 'PROJECT_SYNCED',
+        status: 'SUCCEEDED',
+        message: 'Stored project status is still available',
+        created_at: '2026-07-11T09:05:00',
+      },
+    ])
+
+    renderApp('/projects/demo-api-staging')
+
+    expect(await screen.findByRole('heading', { name: 'demo-api' })).toBeInTheDocument()
+    expect(await screen.findByText('PROJECT_SYNCED')).toBeInTheDocument()
+    expect(screen.getByText(/Event 상태를 일시적으로 확인할 수 없음/)).toBeInTheDocument()
+  })
+
+  it('updates delete and sync in place when the platform recovers from UNAVAILABLE', async () => {
+    vi.useFakeTimers()
     apiMocks.getPlatformStatus
       .mockResolvedValueOnce({
         status: 'UNAVAILABLE',
@@ -218,16 +282,24 @@ describe('project dashboard routes', () => {
         checked_at: '2026-08-12T10:00:15',
       })
 
-    const unavailable = renderApp('/projects/demo-api-staging')
+    renderApp('/projects/demo-api-staging')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Kubernetes API is temporarily unavailable')
+    expect(screen.getByRole('alert')).toHaveTextContent('Kubernetes API is temporarily unavailable')
     expect(screen.getByRole('button', { name: 'Refresh status' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled()
 
-    unavailable.unmount()
-    renderApp('/projects/demo-api-staging')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(1)
+    })
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Ready nodes are not available yet')
+    expect(screen.getByRole('status')).toHaveTextContent('Ready nodes are not available yet')
     expect(screen.getByRole('button', { name: 'Refresh status' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled()
   })
