@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from app.schemas import ProjectCreateRequest
@@ -78,3 +79,20 @@ class AuditLog:
     status: str
     message: str | None
     created_at: datetime
+
+    @classmethod
+    def new(
+        cls,
+        project_id: str,
+        action: str,
+        status: str,
+        message: str | None = None,
+    ) -> "AuditLog":
+        return cls(
+            id=uuid4().hex,
+            project_id=project_id,
+            action=action,
+            status=status,
+            message=message,
+            created_at=utc_now(),
+        )

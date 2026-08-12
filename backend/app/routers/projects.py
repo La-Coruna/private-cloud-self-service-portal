@@ -18,22 +18,13 @@ from app.k8s_client import (
 )
 from app.models import AuditLog, Project, ProjectStatus
 from app.schemas import AuditLogResponse, ProjectCreateRequest, ProjectEventResponse, ProjectResponse, PodResponse
+from app.services.project_service import derive_project_status as _derive_project_status_from_kubernetes
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 SUCCESS_STATUSES = {"created", "already_exists"}
-FAILURE_WAITING_REASONS = {
-    "CrashLoopBackOff",
-    "CreateContainerConfigError",
-    "CreateContainerError",
-    "ErrImagePull",
-    "ImagePullBackOff",
-    "InvalidImageName",
-    "RunContainerError",
-}
-FAILURE_EVENT_REASONS = {"BackOff", "Failed", "FailedCreate", "FailedMount", "FailedScheduling"}
 DEMO_SERVICE_PREFIXES = ("demo-", "portfolio-", "broken-")
 ACTIVE_DEMO_STATUSES = (ProjectStatus.RUNNING, ProjectStatus.PROVISIONING)
 
@@ -98,79 +89,6 @@ def _format_kubernetes_error(result: dict) -> str:
     if detail:
         return f"{prefix}{message}: {detail}"
     return f"{prefix}{message}"
-
-
-def _join_status_details(*details: str | None) -> str | None:
-    useful_details = [detail for detail in details if detail]
-    return " | ".join(useful_details) if useful_details else None
-
-
-def _latest_event_summary(events: list[dict]) -> str | None:
-    if not events:
-        return None
-    event = events[0]
-    reason = event.get("reason") or "Unknown"
-    message = event.get("message")
-    if message:
-        return f"Latest event {reason}: {message}"
-    return f"Latest event {reason}"
-
-
-def _first_waiting_container_summary(pods: list[dict]) -> tuple[str | None, str | None]:
-    for pod in pods:
-        pod_name = pod.get("name") or "unknown-pod"
-        for container in pod.get("containers", []):
-            if container.get("state") != "waiting":
-                continue
-            reason = container.get("reason")
-            if not reason:
-                continue
-            container_name = container.get("name") or "unknown-container"
-            message = container.get("message")
-            summary = f"{pod_name}/{container_name} waiting: {reason}"
-            if message:
-                summary = f"{summary} - {message}"
-            return reason, summary
-    return None, None
-
-
-def _all_pods_ready(pods: list[dict]) -> bool:
-    if not pods:
-        return False
-    for pod in pods:
-        if pod.get("phase") != "Running":
-            return False
-        containers = pod.get("containers", [])
-        if not containers or any(not container.get("ready") for container in containers):
-            return False
-    return True
-
-
-def _derive_project_status_from_kubernetes(
-    pods: list[dict],
-    events: list[dict],
-) -> tuple[ProjectStatus, str | None]:
-    latest_event = _latest_event_summary(events)
-    if _all_pods_ready(pods):
-        return ProjectStatus.RUNNING, None
-
-    waiting_reason, waiting_summary = _first_waiting_container_summary(pods)
-    if waiting_reason in FAILURE_WAITING_REASONS:
-        return ProjectStatus.FAILED, _join_status_details(waiting_summary, latest_event)
-
-    failed_pod = next((pod for pod in pods if pod.get("phase") == "Failed"), None)
-    if failed_pod is not None:
-        pod_summary = f"Pod {failed_pod.get('name') or 'unknown-pod'} is Failed"
-        return ProjectStatus.FAILED, _join_status_details(pod_summary, waiting_summary, latest_event)
-
-    latest_event_reason = events[0].get("reason") if events else None
-    if latest_event_reason in FAILURE_EVENT_REASONS:
-        return ProjectStatus.FAILED, _join_status_details(waiting_summary, latest_event)
-
-    if not pods:
-        return ProjectStatus.PROVISIONING, _join_status_details("No pods found for project yet", latest_event)
-
-    return ProjectStatus.PROVISIONING, _join_status_details(waiting_summary, latest_event)
 
 
 def _mark_failed(project: Project, result: dict, db: Session) -> Project:
