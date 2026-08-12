@@ -6,6 +6,7 @@ from sqlalchemy.exc import OperationalError
 
 from app import db as db_module
 from app.config import Settings
+from app.main import create_database_tables, settings as app_settings
 
 
 def operational_error() -> OperationalError:
@@ -107,6 +108,39 @@ class WaitForDatabaseTests(unittest.TestCase):
 
         connect.assert_called_once_with()
         sleep.assert_not_called()
+
+
+class DatabaseStartupIntegrationTests(unittest.TestCase):
+    @patch("app.main.inspect")
+    @patch("app.main.engine.begin")
+    @patch("app.main.Base.metadata.create_all")
+    @patch("app.main.wait_for_database")
+    def test_waits_for_database_before_schema_initialization(
+        self,
+        mock_wait: MagicMock,
+        mock_create_all: MagicMock,
+        mock_begin: MagicMock,
+        mock_inspect: MagicMock,
+    ) -> None:
+        call_order: list[str] = []
+        connection = MagicMock()
+        mock_begin.return_value.__enter__.return_value = connection
+        mock_wait.side_effect = lambda **kwargs: call_order.append("wait")
+        mock_create_all.side_effect = lambda **kwargs: call_order.append("create_all")
+        mock_inspect.return_value.get_columns.side_effect = (
+            lambda table: call_order.append("inspect")
+            or [{"name": "ingress_host"}]
+        )
+
+        create_database_tables()
+
+        self.assertEqual(call_order, ["wait", "create_all", "inspect"])
+        mock_wait.assert_called_once_with(
+            max_attempts=app_settings.db_startup_max_attempts,
+            retry_delay_seconds=app_settings.db_startup_retry_delay_seconds,
+        )
+        mock_inspect.return_value.get_columns.assert_called_once_with("projects")
+        connection.execute.assert_not_called()
 
 
 if __name__ == "__main__":

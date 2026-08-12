@@ -4,7 +4,7 @@ from sqlalchemy import inspect, text
 
 from app import models  # noqa: F401
 from app.config import get_settings
-from app.db import Base, check_db_connection, engine
+from app.db import Base, check_db_connection, engine, wait_for_database
 from app.k8s_client import check_kubernetes_connection
 from app.routers.projects import router as projects_router
 
@@ -24,6 +24,10 @@ app.include_router(projects_router)
 
 @app.on_event("startup")
 def create_database_tables() -> None:
+    wait_for_database(
+        max_attempts=settings.db_startup_max_attempts,
+        retry_delay_seconds=settings.db_startup_retry_delay_seconds,
+    )
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         columns = {

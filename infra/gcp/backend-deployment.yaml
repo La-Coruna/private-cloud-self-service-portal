@@ -38,6 +38,10 @@ spec:
                 secretKeyRef:
                   name: portal-db-secret
                   key: db-password
+            - name: DB_STARTUP_MAX_ATTEMPTS
+              value: "60"
+            - name: DB_STARTUP_RETRY_DELAY_SECONDS
+              value: "5"
             - name: KUBE_CONTEXT
               value: ""
             - name: DEMO_MODE
