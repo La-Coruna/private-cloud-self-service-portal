@@ -281,7 +281,7 @@ class ProjectServiceTests(unittest.TestCase):
             self.repository.get_project(project.id).status,
             ProjectStatus.DELETED,
         )
-        self.kubernetes.assert_not_called()
+        self.assertEqual(self.kubernetes.mock_calls, [])
         self.platform_status.get_status.assert_not_called()
         self.assertEqual(
             [log.action for log in self.repository.list_audit_logs(project.id)],
