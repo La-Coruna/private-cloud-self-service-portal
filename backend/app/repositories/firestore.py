@@ -152,7 +152,7 @@ class FirestoreProjectRepository:
         project_data = _project_to_dict(project)
         project_data["capacity_claimed"] = True
         _claim(
-            self._client.transaction(),
+            self._client.transaction(max_attempts=20),
             self._projects.document(project.namespace),
             self._capacity,
             project_data,
@@ -180,7 +180,7 @@ class FirestoreProjectRepository:
 
     def release_capacity(self, project_id: str) -> Project:
         project_data = _release(
-            self._client.transaction(),
+            self._client.transaction(max_attempts=20),
             self._projects.document(project_id),
             self._capacity,
             self._max_active_projects,

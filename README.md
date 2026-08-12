@@ -1,6 +1,6 @@
 # Private Cloud Self-Service Portal
 
-> A portfolio-ready Internal Developer Platform MVP built with FastAPI, React, MariaDB, and kind Kubernetes. Developers can request a project from a web dashboard, and the platform provisions Kubernetes Namespace, ResourceQuota, Deployment, Service, and optional Ingress resources automatically.
+> A portfolio-ready Internal Developer Platform MVP built with FastAPI, React, Firestore, and Kubernetes. Developers can request a project from a web dashboard, and the platform provisions Kubernetes Namespace, ResourceQuota, Deployment, Service, and optional Ingress resources automatically.
 
 ## One-Line Summary
 
@@ -41,7 +41,7 @@ This project solves that problem as an MVP: it exposes a simple dashboard and AP
 flowchart LR
   User[Developer Browser] --> React[React TypeScript Dashboard]
   React --> FastAPI[FastAPI Backend]
-  FastAPI --> MariaDB[(MariaDB)]
+  FastAPI --> Firestore[(Firestore)]
   FastAPI --> K8s[Kubernetes API]
   K8s --> NS[Namespace]
   K8s --> RQ[ResourceQuota]
@@ -55,7 +55,7 @@ Provisioning flow:
 
 ```text
 Project Request
-  -> DB record
+  -> Firestore project document
   -> Namespace
   -> ResourceQuota
   -> Deployment
@@ -77,7 +77,7 @@ POST /api/projects/{id}/sync-status
   -> list project Pods
   -> inspect container waiting reason
   -> inspect Kubernetes Events
-  -> update DB project.status
+  -> update Firestore project.status
   -> write Audit Log
 ```
 
@@ -85,8 +85,8 @@ POST /api/projects/{id}/sync-status
 
 | Area | Stack |
 | --- | --- |
-| Backend | Python, FastAPI, SQLAlchemy, Pydantic |
-| Database | MariaDB |
+| Backend | Python, FastAPI, Pydantic |
+| Database | Cloud Firestore; in-memory adapter for fast local development |
 | Frontend | React, TypeScript, Vite, TanStack Query, React Router, Axios |
 | Kubernetes | kind, kubernetes Python client, ingress-nginx |
 | Infra | Docker Compose, PowerShell scripts |
@@ -94,13 +94,26 @@ POST /api/projects/{id}/sync-status
 
 ## How to Run
 
-### 1. Start MariaDB
+### 1. Choose the local repository
+
+Fast unit development uses the in-memory repository and does not require MariaDB or Firebase:
 
 ```powershell
-docker compose -f infra/docker-compose.yml up -d
+Copy-Item backend\.env.example backend\.env
+# backend/.env.example defaults to REPOSITORY_BACKEND=memory
 ```
 
-### 2. Create the kind cluster
+For persistence integration, set `REPOSITORY_BACKEND=firestore` in `backend/.env` and start the local Firestore emulator from the repository root:
+
+```powershell
+Copy-Item .firebaserc.example .firebaserc
+# Replace only the placeholder with a non-sensitive local/demo project ID.
+firebase emulators:start --only firestore
+```
+
+The emulator listens on `127.0.0.1:8085`. No production Firestore rules are opened: the deployed backend uses server-side credentials, and browser clients do not access Firestore directly.
+
+### 2. Create the kind cluster (when exercising Kubernetes workflows)
 
 For local Ingress browser access, use the scripts with host port settings:
 
@@ -119,7 +132,6 @@ kind create cluster --config infra/kind/kind-config.yaml
 
 ```powershell
 cd backend
-Copy-Item .env.example .env
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -165,6 +177,12 @@ http://127.0.0.1:5173/projects
 cd backend
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 .\.venv\Scripts\python.exe -m compileall app
+```
+
+Run the real Firestore integration tests from the repository root. The test module skips only when `FIRESTORE_EMULATOR_HOST` is absent; `emulators:exec` supplies it automatically.
+
+```powershell
+firebase emulators:exec --only firestore "backend\.venv\Scripts\python.exe -m unittest backend.tests.integration.test_firestore_emulator -v"
 ```
 
 ```powershell
@@ -256,6 +274,8 @@ See [docs/job-fit.md](docs/job-fit.md) for a detailed mapping.
 
 
 ## Public Demo Deployment
+
+The active serverless target is Firebase Hosting for the React build, Cloud Run for FastAPI, and Firestore for portal state. The earlier GKE-hosted portal and MariaDB instructions below remain as explicitly labeled rollback/history material; MariaDB is not a dependency of the serverless path. Do not remove the legacy MariaDB storage or portal workloads without the separately approved cutover and rollback procedure.
 
 A GCP GKE Autopilot public demo deployment package is available under `infra/gcp/`.
 

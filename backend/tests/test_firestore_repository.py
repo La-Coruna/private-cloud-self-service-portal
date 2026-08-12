@@ -140,8 +140,9 @@ class FakeFirestoreClient:
     def document(self, document_path):
         return FakeDocumentReference(self, require_string_path_element(document_path))
 
-    def transaction(self):
+    def transaction(self, max_attempts=5):
         transaction = FakeTransaction(self)
+        transaction.max_attempts = max_attempts
         self.transactions.append(transaction)
         return transaction
 
@@ -292,6 +293,17 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
         self.assertEqual(
             transactions[0].write_paths,
             [f"projects/{project.namespace}", "system/demoCapacity"],
+        )
+
+    def test_capacity_transactions_allow_twenty_attempts_for_contention(self):
+        project = make_project()
+
+        self.repository.claim_capacity_and_create(project)
+        self.repository.release_capacity(project.id)
+
+        self.assertEqual(
+            [transaction.max_attempts for transaction in self.client.transactions],
+            [20, 20],
         )
 
     def test_claim_transaction_rejects_fourth_active_project(self):
