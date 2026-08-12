@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "private-cloud-self-service-portal"
     app_env: str = "local"
+
+    firestore_project_id: str = ""
+    firestore_database: str = "(default)"
+    repository_backend: Literal["firestore", "memory"] = "firestore"
 
     db_host: str = "127.0.0.1"
     db_port: int = 3306
