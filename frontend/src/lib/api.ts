@@ -1,14 +1,34 @@
 import axios from 'axios'
 
-import type { AuditLog, PodStatus, Project, ProjectCreatePayload, ProjectEvent } from './types'
+import type { AuditLog, PlatformStatus, PodStatus, Project, ProjectCreatePayload, ProjectEvent } from './types'
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000',
+  baseURL: import.meta.env.VITE_API_BASE_URL ?? '',
 })
 
+const readRetryDelays = [250, 1000]
+
+function isTransientReadError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false
+  return !error.response || [502, 503, 504].includes(error.response.status)
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
 async function request<T>(method: 'GET' | 'POST' | 'DELETE', url: string, data?: unknown): Promise<T> {
-  const response = await api.request<T>({ method, url, ...(data === undefined ? {} : { data }) })
-  return response.data
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const response = await api.request<T>({ method, url, ...(data === undefined ? {} : { data }) })
+      return response.data
+    } catch (error) {
+      if (method !== 'GET' || attempt >= readRetryDelays.length || !isTransientReadError(error)) {
+        throw error
+      }
+      await delay(readRetryDelays[attempt])
+    }
+  }
 }
 
 export function getProjects(): Promise<Project[]> {
@@ -45,4 +65,8 @@ export function syncProjectStatus(id: string): Promise<Project> {
 
 export function deleteProject(id: string): Promise<Project> {
   return request<Project>('DELETE', projectPath(id))
+}
+
+export function getPlatformStatus(): Promise<PlatformStatus> {
+  return request<PlatformStatus>('GET', '/api/platform-status')
 }

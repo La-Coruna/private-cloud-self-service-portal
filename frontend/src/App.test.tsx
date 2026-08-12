@@ -8,7 +8,7 @@ import App from './App'
 
 const apiMocks = vi.hoisted(() => {
   const project = {
-    id: 1,
+    id: 'demo-api-staging',
     service_name: 'demo-api',
     environment: 'staging' as const,
     image: 'nginx:latest',
@@ -132,11 +132,11 @@ describe('project dashboard routes', () => {
 
   it('syncs project status from the detail page', async () => {
     const user = userEvent.setup()
-    renderApp('/projects/1')
+    renderApp('/projects/demo-api-staging')
 
     expect(await screen.findByRole('heading', { name: 'demo-api' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Refresh status/i }))
 
-    await waitFor(() => expect(apiMocks.syncProjectStatus).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(apiMocks.syncProjectStatus).toHaveBeenCalledWith('demo-api-staging'))
   })
 })

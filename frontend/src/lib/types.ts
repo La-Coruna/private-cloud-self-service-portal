@@ -2,6 +2,15 @@ export type ProjectStatus = 'REQUESTED' | 'PROVISIONING' | 'RUNNING' | 'FAILED' 
 
 export type Environment = 'dev' | 'staging' | 'prod'
 
+export type PlatformAvailability = 'AVAILABLE' | 'RECOVERING' | 'UNAVAILABLE'
+
+export interface PlatformStatus {
+  status: PlatformAvailability
+  message: string
+  creation_allowed: boolean
+  checked_at: string
+}
+
 export interface Project {
   id: string
   service_name: string

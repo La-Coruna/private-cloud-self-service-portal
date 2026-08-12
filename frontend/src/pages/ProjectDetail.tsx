@@ -9,14 +9,14 @@ import { textOrDash } from '../lib/format'
 
 export function ProjectDetailPage() {
   const { id } = useParams()
-  const projectId = Number(id)
+  const projectId = id ?? ''
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
-  const projectQuery = useQuery({ queryKey: ['project', projectId], queryFn: () => getProject(projectId), enabled: Number.isFinite(projectId) })
-  const podsQuery = useQuery({ queryKey: ['project', projectId, 'pods'], queryFn: () => getPods(projectId), enabled: Number.isFinite(projectId) })
-  const eventsQuery = useQuery({ queryKey: ['project', projectId, 'events'], queryFn: () => getEvents(projectId), enabled: Number.isFinite(projectId) })
-  const auditsQuery = useQuery({ queryKey: ['project', projectId, 'audit-logs'], queryFn: () => getAuditLogs(projectId), enabled: Number.isFinite(projectId) })
+  const projectQuery = useQuery({ queryKey: ['project', projectId], queryFn: () => getProject(projectId), enabled: projectId.length > 0 })
+  const podsQuery = useQuery({ queryKey: ['project', projectId, 'pods'], queryFn: () => getPods(projectId), enabled: projectId.length > 0 })
+  const eventsQuery = useQuery({ queryKey: ['project', projectId, 'events'], queryFn: () => getEvents(projectId), enabled: projectId.length > 0 })
+  const auditsQuery = useQuery({ queryKey: ['project', projectId, 'audit-logs'], queryFn: () => getAuditLogs(projectId), enabled: projectId.length > 0 })
 
   const syncMutation = useMutation({
     mutationFn: () => syncProjectStatus(projectId),
