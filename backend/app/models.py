@@ -1,23 +1,10 @@
-import enum
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.domain import ProjectStatus, utc_now
 from app.db import Base
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
-
-
-class ProjectStatus(str, enum.Enum):
-    REQUESTED = "REQUESTED"
-    PROVISIONING = "PROVISIONING"
-    RUNNING = "RUNNING"
-    FAILED = "FAILED"
-    DELETING = "DELETING"
-    DELETED = "DELETED"
 
 
 class Project(Base):

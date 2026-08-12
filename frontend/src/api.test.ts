@@ -35,12 +35,12 @@ describe('project API client', () => {
       memory_limit: '512Mi',
       expose_external: true,
     })
-    await getProject(3)
-    await getPods(3)
-    await getEvents(3)
-    await getAuditLogs(3)
-    await syncProjectStatus(3)
-    await deleteProject(3)
+    await getProject('demo-api-staging')
+    await getPods('demo-api-staging')
+    await getEvents('demo-api-staging')
+    await getAuditLogs('demo-api-staging')
+    await syncProjectStatus('demo-api-staging')
+    await deleteProject('demo-api-staging')
 
     expect(request).toHaveBeenNthCalledWith(1, { method: 'GET', url: '/api/projects' })
     expect(request).toHaveBeenNthCalledWith(2, {
@@ -48,11 +48,19 @@ describe('project API client', () => {
       url: '/api/projects',
       data: expect.objectContaining({ service_name: 'web' }),
     })
-    expect(request).toHaveBeenNthCalledWith(3, { method: 'GET', url: '/api/projects/3' })
-    expect(request).toHaveBeenNthCalledWith(4, { method: 'GET', url: '/api/projects/3/pods' })
-    expect(request).toHaveBeenNthCalledWith(5, { method: 'GET', url: '/api/projects/3/events' })
-    expect(request).toHaveBeenNthCalledWith(6, { method: 'GET', url: '/api/projects/3/audit-logs' })
-    expect(request).toHaveBeenNthCalledWith(7, { method: 'POST', url: '/api/projects/3/sync-status' })
-    expect(request).toHaveBeenNthCalledWith(8, { method: 'DELETE', url: '/api/projects/3' })
+    expect(request).toHaveBeenNthCalledWith(3, { method: 'GET', url: '/api/projects/demo-api-staging' })
+    expect(request).toHaveBeenNthCalledWith(4, { method: 'GET', url: '/api/projects/demo-api-staging/pods' })
+    expect(request).toHaveBeenNthCalledWith(5, { method: 'GET', url: '/api/projects/demo-api-staging/events' })
+    expect(request).toHaveBeenNthCalledWith(6, { method: 'GET', url: '/api/projects/demo-api-staging/audit-logs' })
+    expect(request).toHaveBeenNthCalledWith(7, { method: 'POST', url: '/api/projects/demo-api-staging/sync-status' })
+    expect(request).toHaveBeenNthCalledWith(8, { method: 'DELETE', url: '/api/projects/demo-api-staging' })
+  })
+
+  it('URL-encodes namespace identifiers in project endpoint paths', async () => {
+    request.mockResolvedValue({ data: {} })
+
+    await getProject('demo api/staging')
+
+    expect(request).toHaveBeenCalledWith({ method: 'GET', url: '/api/projects/demo%20api%2Fstaging' })
   })
 })

@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.models import ProjectStatus
+from app.domain import ProjectStatus
 
 
 class ProjectCreateRequest(BaseModel):
@@ -23,7 +23,7 @@ class ProjectCreateRequest(BaseModel):
 
 
 class ProjectResponse(BaseModel):
-    id: int
+    id: str
     service_name: str
     environment: str
     image: str
@@ -77,8 +77,8 @@ class ProjectEventResponse(BaseModel):
 
 
 class AuditLogResponse(BaseModel):
-    id: int
-    project_id: int
+    id: str
+    project_id: str
     action: str
     status: str
     message: str | None

@@ -19,26 +19,30 @@ export function createProject(payload: ProjectCreatePayload): Promise<Project> {
   return request<Project>('POST', '/api/projects', payload)
 }
 
-export function getProject(id: number): Promise<Project> {
-  return request<Project>('GET', `/api/projects/${id}`)
+function projectPath(id: string): string {
+  return `/api/projects/${encodeURIComponent(id)}`
 }
 
-export function getPods(id: number): Promise<PodStatus[]> {
-  return request<PodStatus[]>('GET', `/api/projects/${id}/pods`)
+export function getProject(id: string): Promise<Project> {
+  return request<Project>('GET', projectPath(id))
 }
 
-export function getEvents(id: number): Promise<ProjectEvent[]> {
-  return request<ProjectEvent[]>('GET', `/api/projects/${id}/events`)
+export function getPods(id: string): Promise<PodStatus[]> {
+  return request<PodStatus[]>('GET', `${projectPath(id)}/pods`)
 }
 
-export function getAuditLogs(id: number): Promise<AuditLog[]> {
-  return request<AuditLog[]>('GET', `/api/projects/${id}/audit-logs`)
+export function getEvents(id: string): Promise<ProjectEvent[]> {
+  return request<ProjectEvent[]>('GET', `${projectPath(id)}/events`)
 }
 
-export function syncProjectStatus(id: number): Promise<Project> {
-  return request<Project>('POST', `/api/projects/${id}/sync-status`)
+export function getAuditLogs(id: string): Promise<AuditLog[]> {
+  return request<AuditLog[]>('GET', `${projectPath(id)}/audit-logs`)
 }
 
-export function deleteProject(id: number): Promise<Project> {
-  return request<Project>('DELETE', `/api/projects/${id}`)
+export function syncProjectStatus(id: string): Promise<Project> {
+  return request<Project>('POST', `${projectPath(id)}/sync-status`)
+}
+
+export function deleteProject(id: string): Promise<Project> {
+  return request<Project>('DELETE', projectPath(id))
 }

@@ -3,7 +3,7 @@ export type ProjectStatus = 'REQUESTED' | 'PROVISIONING' | 'RUNNING' | 'FAILED' 
 export type Environment = 'dev' | 'staging' | 'prod'
 
 export interface Project {
-  id: number
+  id: string
   service_name: string
   environment: Environment
   image: string
@@ -67,8 +67,8 @@ export interface ProjectEvent {
 }
 
 export interface AuditLog {
-  id: number
-  project_id: number
+  id: string
+  project_id: string
   action: string
   status: string
   message: string | null
