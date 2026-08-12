@@ -1,12 +1,13 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import inspect, text
+from fastapi.responses import JSONResponse
 
-from app import models  # noqa: F401
 from app.config import get_settings
-from app.db import Base, check_db_connection, engine, wait_for_database
-from app.k8s_client import check_kubernetes_connection
+from app.dependencies import get_platform_status_service, get_repository
+from app.repositories import ProjectRepository
+from app.routers.platform import router as platform_router
 from app.routers.projects import router as projects_router
+from app.services.platform_status import PlatformStatusService
 
 
 settings = get_settings()
@@ -20,24 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(projects_router)
-
-
-@app.on_event("startup")
-def create_database_tables() -> None:
-    wait_for_database(
-        max_attempts=settings.db_startup_max_attempts,
-        retry_delay_seconds=settings.db_startup_retry_delay_seconds,
-    )
-    Base.metadata.create_all(bind=engine)
-    with engine.begin() as connection:
-        columns = {
-            column["name"]
-            for column in inspect(connection).get_columns("projects")
-        }
-        if "ingress_host" not in columns:
-            connection.execute(
-                text("ALTER TABLE projects ADD COLUMN ingress_host VARCHAR(255) NULL")
-            )
+app.include_router(platform_router)
 
 
 @app.get("/")
@@ -50,18 +34,40 @@ def read_root() -> dict:
 
 
 @app.get("/health")
-def health_check() -> dict:
-    database = check_db_connection()
-    kubernetes = check_kubernetes_connection()
-    dependency_statuses = [database["status"], kubernetes["status"]]
-    status = "ok" if all(item == "ok" for item in dependency_statuses) else "degraded"
+def health_check(
+    repository: ProjectRepository = Depends(get_repository),
+    platform_service: PlatformStatusService = Depends(get_platform_status_service),
+):
+    platform = platform_service.get_status()
+    gke_status = {
+        "status": platform.status.value,
+        "message": platform.message,
+        "creation_allowed": platform.creation_allowed,
+        "checked_at": platform.checked_at.isoformat(),
+    }
+
+    try:
+        firestore_status = repository.health_check()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "app": settings.app_name,
+                "env": settings.app_env,
+                "dependencies": {
+                    "firestore": {"status": "error", "message": str(exc)},
+                    "gke": gke_status,
+                },
+            },
+        )
 
     return {
-        "status": status,
+        "status": "ok" if platform.creation_allowed else "degraded",
         "app": settings.app_name,
         "env": settings.app_env,
         "dependencies": {
-            "database": database,
-            "kubernetes": kubernetes,
+            "firestore": firestore_status,
+            "gke": gke_status,
         },
     }

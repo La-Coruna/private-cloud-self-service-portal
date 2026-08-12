@@ -207,5 +207,5 @@ class FirestoreProjectRepository:
         return sorted(logs, key=lambda log: (log.created_at, log.id))
 
     def health_check(self) -> dict[str, str]:
-        self._capacity.get()
+        self._capacity.get(timeout=5.0)
         return {"status": "ok"}

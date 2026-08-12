@@ -1,596 +1,211 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from typing import Annotated
 
-from app.audit import create_audit_log
-from app.config import get_settings
-from app.db import get_db
-from app.k8s_client import (
-    build_ingress_host,
-    create_deployment,
-    create_ingress,
-    create_namespace,
-    create_resource_quota,
-    create_service,
-    delete_project_resources,
-    list_project_events,
-    list_project_pods,
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi.responses import JSONResponse
+
+from app.dependencies import get_project_service, get_repository
+from app.repositories import (
+    DemoCapacityExceeded,
+    ProjectAlreadyExists,
+    ProjectNotFound,
+    ProjectRepository,
 )
-from app.models import AuditLog, Project, ProjectStatus
-from app.schemas import AuditLogResponse, ProjectCreateRequest, ProjectEventResponse, ProjectResponse, PodResponse
-from app.services.project_service import derive_project_status as _derive_project_status_from_kubernetes
+from app.schemas import (
+    AuditLogResponse,
+    PodResponse,
+    ProjectCreateRequest,
+    ProjectEventResponse,
+    ProjectResponse,
+)
+from app.services import GkeUnavailable, InvalidLifecycleOperation, ProjectService
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
-
-
-SUCCESS_STATUSES = {"created", "already_exists"}
+NamespaceId = Annotated[
+    str,
+    Path(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    ),
+]
 DEMO_SERVICE_PREFIXES = ("demo-", "portfolio-", "broken-")
-ACTIVE_DEMO_STATUSES = (ProjectStatus.RUNNING, ProjectStatus.PROVISIONING)
+GKE_UNAVAILABLE_MESSAGE = "GKE 상태를 일시적으로 확인할 수 없습니다."
 
 
 def _demo_allowed_images(settings) -> list[str]:
-    allowed_images = getattr(settings, "demo_allowed_images", [])
-    if isinstance(allowed_images, str):
-        return [image.strip() for image in allowed_images.split(",") if image.strip()]
-    return list(allowed_images)
+    return [
+        image.strip()
+        for image in settings.demo_allowed_images.split(",")
+        if image.strip()
+    ]
 
 
-def build_namespace(service_name: str, environment: str) -> str:
-    settings = get_settings()
-    prefix = settings.demo_namespace_prefix if settings.demo_mode else ""
-    return f"{prefix}{service_name}-{environment}"
-
-
-def _validate_demo_project_request(
+def _validate_demo_request(
     request: ProjectCreateRequest,
-    db: Session,
+    service: ProjectService,
 ) -> None:
-    settings = get_settings()
+    settings = service.settings
     if not settings.demo_mode:
         return
-
     if not request.service_name.startswith(DEMO_SERVICE_PREFIXES):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Demo mode allows only demo-, portfolio-, or broken- service names",
         )
-
-    allowed_images = _demo_allowed_images(settings)
-    if request.image not in allowed_images:
+    if request.image not in _demo_allowed_images(settings):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Image is not allowed in demo mode: {request.image}",
         )
-
     if request.replicas > settings.demo_max_replicas:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Demo mode replicas cannot exceed {settings.demo_max_replicas}",
         )
 
-    active_count = db.scalar(
-        select(func.count())
-        .select_from(Project)
-        .where(Project.status.in_(ACTIVE_DEMO_STATUSES))
+
+def _not_found(project_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Project not found: {project_id}",
     )
-    if active_count >= settings.demo_max_projects:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"demo project limit reached: {settings.demo_max_projects}",
-        )
 
 
-def _format_kubernetes_error(result: dict) -> str:
-    resource = result.get("resource")
-    message = result.get("message") or "Kubernetes resource creation failed"
-    detail = result.get("detail")
-    prefix = f"{resource}: " if resource else ""
-    if detail:
-        return f"{prefix}{message}: {detail}"
-    return f"{prefix}{message}"
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
-def _mark_failed(project: Project, result: dict, db: Session) -> Project:
-    project.status = ProjectStatus.FAILED
-    project.error_message = _format_kubernetes_error(result)
-    db.commit()
-    db.refresh(project)
+def _gke_unavailable(exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "error": {
+                "code": "GKE_UNAVAILABLE",
+                "message": GKE_UNAVAILABLE_MESSAGE,
+                "detail": str(exc),
+            }
+        },
+    )
+
+
+def _existing_project(service: ProjectService, project_id: str):
+    project = service.repository.get_project(project_id)
+    if project is None:
+        raise _not_found(project_id)
     return project
-
-
-def _is_success(result: dict) -> bool:
-    return result.get("status") in SUCCESS_STATUSES
-
-
-def _log_project_event(
-    db: Session,
-    project: Project,
-    action: str,
-    status: str,
-    message: str | None = None,
-) -> None:
-    create_audit_log(
-        db=db,
-        project_id=project.id,
-        action=action,
-        status=status,
-        message=message,
-    )
-
-
-def _mark_failed_with_audit(
-    project: Project,
-    result: dict,
-    db: Session,
-    action: str,
-) -> Project:
-    failed_project = _mark_failed(project, result, db)
-    _log_project_event(
-        db=db,
-        project=failed_project,
-        action=action,
-        status="FAILED",
-        message=failed_project.error_message,
-    )
-    return failed_project
-
-def _is_delete_success(result: dict) -> bool:
-    return result.get("status") in {"deleted", "not_found"}
-
-
-def _format_delete_error_message(results: list[dict]) -> str:
-    messages = []
-    for result in results:
-        if _is_delete_success(result):
-            continue
-        resource = result.get("resource", "unknown")
-        name = result.get("name", "unknown")
-        message = result.get("message") or "Unknown Kubernetes error"
-        detail = result.get("detail")
-        if detail:
-            messages.append(f"{resource}/{name}: {message} - {detail}")
-        else:
-            messages.append(f"{resource}/{name}: {message}")
-    return " | ".join(messages)
-
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 def create_project(
     request: ProjectCreateRequest,
-    db: Session = Depends(get_db),
-) -> Project:
-    _validate_demo_project_request(request, db)
-    namespace = build_namespace(request.service_name, request.environment)
-    existing_project = db.execute(
-        select(Project).where(Project.namespace == namespace)
-    ).scalar_one_or_none()
-
-    if existing_project is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Namespace already requested: {namespace}",
-        )
-
-    project = Project(
-        service_name=request.service_name,
-        environment=request.environment,
-        image=request.image,
-        replicas=request.replicas,
-        cpu_request=request.cpu_request,
-        cpu_limit=request.cpu_limit,
-        memory_request=request.memory_request,
-        memory_limit=request.memory_limit,
-        expose_external=request.expose_external,
-        namespace=namespace,
-        status=ProjectStatus.REQUESTED,
-    )
-    db.add(project)
-    db.commit()
-    db.refresh(project)
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="PROJECT_CREATE_REQUESTED",
-        status="SUCCESS",
-        message=f"Project request saved for namespace={project.namespace}",
-    )
-
-    project.status = ProjectStatus.PROVISIONING
-    db.commit()
-    db.refresh(project)
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="PROJECT_PROVISIONING_STARTED",
-        status="SUCCESS",
-        message="Project provisioning started",
-    )
-
-    namespace_result = create_namespace(
-        namespace,
-        project.id,
-        request.service_name,
-        request.environment,
-    )
-    if not _is_success(namespace_result):
-        return _mark_failed_with_audit(
-            project,
-            namespace_result,
-            db,
-            "NAMESPACE_CREATE_FAILED",
-        )
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="NAMESPACE_CREATED",
-        status="SUCCESS",
-        message=f"Namespace created: {project.namespace}",
-    )
-
-    quota_result = create_resource_quota(
-        namespace=namespace,
-        project_id=project.id,
-        service_name=request.service_name,
-        environment=request.environment,
-    )
-    if not _is_success(quota_result):
-        return _mark_failed_with_audit(
-            project,
-            quota_result,
-            db,
-            "RESOURCE_QUOTA_CREATE_FAILED",
-        )
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="RESOURCE_QUOTA_CREATED",
-        status="SUCCESS",
-        message=f"ResourceQuota created in namespace={project.namespace}",
-    )
-
-    deployment_result = create_deployment(
-        namespace=namespace,
-        project_id=project.id,
-        service_name=request.service_name,
-        environment=request.environment,
-        image=request.image,
-        replicas=request.replicas,
-        cpu_request=request.cpu_request,
-        cpu_limit=request.cpu_limit,
-        memory_request=request.memory_request,
-        memory_limit=request.memory_limit,
-    )
-    if not _is_success(deployment_result):
-        return _mark_failed_with_audit(
-            project,
-            deployment_result,
-            db,
-            "DEPLOYMENT_CREATE_FAILED",
-        )
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="DEPLOYMENT_CREATED",
-        status="SUCCESS",
-        message=f"Deployment created: {project.service_name}",
-    )
-
-    service_result = create_service(
-        namespace=namespace,
-        project_id=project.id,
-        service_name=request.service_name,
-        environment=request.environment,
-    )
-    if not _is_success(service_result):
-        return _mark_failed_with_audit(
-            project,
-            service_result,
-            db,
-            "SERVICE_CREATE_FAILED",
-        )
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="SERVICE_CREATED",
-        status="SUCCESS",
-        message=f"Service created: {project.service_name}-svc",
-    )
-
-    if request.expose_external:
-        ingress_host = build_ingress_host(request.service_name, request.environment)
-        ingress_result = create_ingress(
-            namespace=namespace,
-            project_id=project.id,
-            service_name=request.service_name,
-            environment=request.environment,
-            host=ingress_host,
-        )
-        if not _is_success(ingress_result):
-            return _mark_failed_with_audit(
-                project,
-                ingress_result,
-                db,
-                "INGRESS_CREATE_FAILED",
-            )
-
-        project.ingress_host = ingress_host
-        db.commit()
-        db.refresh(project)
-
-        _log_project_event(
-            db=db,
-            project=project,
-            action="INGRESS_CREATED",
-            status="SUCCESS",
-            message=f"Ingress created: {ingress_host}",
-        )
-    else:
-        _log_project_event(
-            db=db,
-            project=project,
-            action="INGRESS_SKIPPED",
-            status="SUCCESS",
-            message="External exposure was not requested",
-        )
-
-    project.status = ProjectStatus.RUNNING
-    project.error_message = None
-    db.commit()
-    db.refresh(project)
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="PROJECT_RUNNING",
-        status="SUCCESS",
-        message="Project provisioning completed",
-    )
-
-    return project
+    service: ProjectService = Depends(get_project_service),
+):
+    _validate_demo_request(request, service)
+    try:
+        return service.create_project(request)
+    except ProjectAlreadyExists as exc:
+        raise _conflict(f"Project already exists: {exc}") from exc
+    except DemoCapacityExceeded as exc:
+        raise _conflict(f"demo project limit reached: {service.settings.demo_max_projects}") from exc
+    except InvalidLifecycleOperation as exc:
+        raise _conflict(str(exc)) from exc
+    except GkeUnavailable as exc:
+        return _gke_unavailable(exc)
 
 
 @router.get("", response_model=list[ProjectResponse])
-def list_projects(db: Session = Depends(get_db)) -> list[Project]:
-    return list(db.execute(select(Project).order_by(Project.created_at.desc())).scalars())
+def list_projects(
+    repository: ProjectRepository = Depends(get_repository),
+):
+    return repository.list_projects()
 
 
 @router.get("/{project_id}/pods", response_model=list[PodResponse])
 def get_project_pods(
-    project_id: int,
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-
+    project_id: NamespaceId,
+    service: ProjectService = Depends(get_project_service),
+):
+    project = _existing_project(service, project_id)
     try:
-        return list_project_pods(namespace=project.namespace, project_id=project.id)
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        ) from exc
+        service._require_gke()
+        return service.kubernetes.list_project_pods(
+            namespace=project.namespace,
+            project_id=project.id,
+        )
+    except GkeUnavailable as exc:
+        return _gke_unavailable(exc)
+    except Exception as exc:
+        return _gke_unavailable(exc)
+
 
 @router.get("/{project_id}/events", response_model=list[ProjectEventResponse])
 def get_project_events(
-    project_id: int,
+    project_id: NamespaceId,
     limit: int = Query(default=50, ge=1, le=200),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-
+    service: ProjectService = Depends(get_project_service),
+):
+    project = _existing_project(service, project_id)
     try:
-        return list_project_events(
+        service._require_gke()
+        return service.kubernetes.list_project_events(
             namespace=project.namespace,
             project_id=project.id,
             service_name=project.service_name,
             limit=limit,
         )
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        ) from exc
+    except GkeUnavailable as exc:
+        return _gke_unavailable(exc)
+    except Exception as exc:
+        return _gke_unavailable(exc)
 
 
 @router.post("/{project_id}/sync-status", response_model=ProjectResponse)
 def sync_project_status(
-    project_id: int,
-    db: Session = Depends(get_db),
-) -> Project:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-
-    if project.status in {ProjectStatus.DELETING, ProjectStatus.DELETED}:
-        _log_project_event(
-            db=db,
-            project=project,
-            action="PROJECT_STATUS_SYNC_SKIPPED",
-            status="SUCCESS",
-            message=f"Status sync skipped because project is {project.status.value}",
-        )
-        return project
-
-    previous_status = project.status
+    project_id: NamespaceId,
+    service: ProjectService = Depends(get_project_service),
+):
     try:
-        pods = list_project_pods(namespace=project.namespace, project_id=project.id)
-        events = list_project_events(
-            namespace=project.namespace,
-            project_id=project.id,
-            service_name=project.service_name,
-            limit=50,
-        )
-    except RuntimeError as exc:
-        project.status = ProjectStatus.FAILED
-        project.error_message = str(exc)
-        db.commit()
-        db.refresh(project)
-        _log_project_event(
-            db=db,
-            project=project,
-            action="PROJECT_STATUS_SYNC_FAILED",
-            status="FAILED",
-            message=project.error_message,
-        )
-        return project
-
-    next_status, status_detail = _derive_project_status_from_kubernetes(pods, events)
-    project.status = next_status
-    project.error_message = status_detail if next_status == ProjectStatus.FAILED else None
-    db.commit()
-    db.refresh(project)
-
-    message = f"Kubernetes status synced: {previous_status.value} -> {project.status.value}"
-    if status_detail:
-        message = f"{message} | {status_detail}"
-    _log_project_event(
-        db=db,
-        project=project,
-        action="PROJECT_STATUS_SYNCED",
-        status="FAILED" if project.status == ProjectStatus.FAILED else "SUCCESS",
-        message=message,
-    )
-
-    return project
+        return service.sync_status(project_id)
+    except ProjectNotFound as exc:
+        raise _not_found(project_id) from exc
+    except InvalidLifecycleOperation as exc:
+        raise _conflict(str(exc)) from exc
+    except GkeUnavailable as exc:
+        return _gke_unavailable(exc)
 
 
 @router.delete("/{project_id}", response_model=ProjectResponse)
 def delete_project(
-    project_id: int,
-    db: Session = Depends(get_db),
-) -> Project:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-
-    if project.status == ProjectStatus.DELETED:
-        return project
-
-    project.status = ProjectStatus.DELETING
-    project.error_message = None
-    db.commit()
-    db.refresh(project)
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="PROJECT_DELETE_REQUESTED",
-        status="SUCCESS",
-        message=f"Project delete requested for namespace={project.namespace}",
-    )
-
-    delete_results = delete_project_resources(
-        namespace=project.namespace,
-        service_name=project.service_name,
-    )
-
-    delete_action_by_resource = {
-        "ingress": "INGRESS_DELETED",
-        "service": "SERVICE_DELETED",
-        "deployment": "DEPLOYMENT_DELETED",
-        "resourcequota": "RESOURCE_QUOTA_DELETED",
-        "namespace": "NAMESPACE_DELETED",
-    }
-
-    for result in delete_results:
-        resource = result.get("resource", "unknown")
-        name = result.get("name", "unknown")
-        result_status = "SUCCESS" if _is_delete_success(result) else "FAILED"
-        action = delete_action_by_resource.get(resource, "K8S_RESOURCE_DELETED")
-        message = f"{resource}/{name}: {result.get('status')}"
-        if result.get("message"):
-            message = f"{message} - {result.get('message')}"
-        _log_project_event(
-            db=db,
-            project=project,
-            action=action,
-            status=result_status,
-            message=message,
-        )
-
-    if any(not _is_delete_success(result) for result in delete_results):
-        project.status = ProjectStatus.FAILED
-        project.error_message = _format_delete_error_message(delete_results)
-        db.commit()
-        db.refresh(project)
-
-        _log_project_event(
-            db=db,
-            project=project,
-            action="PROJECT_DELETE_FAILED",
-            status="FAILED",
-            message=project.error_message,
-        )
-
-        return project
-
-    project.status = ProjectStatus.DELETED
-    project.error_message = None
-    db.commit()
-    db.refresh(project)
-
-    _log_project_event(
-        db=db,
-        project=project,
-        action="PROJECT_DELETED",
-        status="SUCCESS",
-        message="Project resources deleted successfully",
-    )
-
-    return project
+    project_id: NamespaceId,
+    service: ProjectService = Depends(get_project_service),
+):
+    try:
+        return service.delete_project(project_id)
+    except ProjectNotFound as exc:
+        raise _not_found(project_id) from exc
+    except InvalidLifecycleOperation as exc:
+        raise _conflict(str(exc)) from exc
+    except GkeUnavailable as exc:
+        return _gke_unavailable(exc)
 
 
 @router.get("/{project_id}/audit-logs", response_model=list[AuditLogResponse])
 def get_project_audit_logs(
-    project_id: int,
-    db: Session = Depends(get_db),
-) -> list[AuditLog]:
-    project = db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-    return list(
-        db.execute(
-            select(AuditLog)
-            .where(AuditLog.project_id == project_id)
-            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
-        ).scalars()
-    )
+    project_id: NamespaceId,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    if repository.get_project(project_id) is None:
+        raise _not_found(project_id)
+    return repository.list_audit_logs(project_id)
+
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 def get_project(
-    project_id: int,
-    db: Session = Depends(get_db),
-) -> Project:
-    project = db.get(Project, project_id)
+    project_id: NamespaceId,
+    repository: ProjectRepository = Depends(get_repository),
+):
+    project = repository.get_project(project_id)
     if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
+        raise _not_found(project_id)
     return project

@@ -48,7 +48,9 @@ class FakeDocumentReference:
             f"{self.path}/{require_string_path_element(collection_id)}",
         )
 
-    def get(self, transaction=None):
+    def get(self, transaction=None, timeout=None):
+        self._client.get_calls.append((self.path, timeout))
+
         active_transaction = self._client._active_transaction
         if active_transaction is not None and transaction is not active_transaction:
             raise AssertionError("transactional reads must use the active transaction")
@@ -129,6 +131,7 @@ class FakeFirestoreClient:
         self._documents = {}
 
         self._active_transaction = None
+        self.get_calls = []
         self.transactions = []
     def collection(self, collection_id):
 
@@ -340,6 +343,10 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
 
     def test_health_check_reports_an_healthy_repository(self):
         self.assertEqual(self.repository.health_check(), {"status": "ok"})
+        self.assertEqual(
+            self.client.get_calls,
+            [("system/demoCapacity", 5.0)],
+        )
 
 
 if __name__ == "__main__":
