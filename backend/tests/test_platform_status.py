@@ -74,7 +74,10 @@ class PlatformStatusServiceTests(unittest.TestCase):
 
                 self.assertEqual(result.status, PlatformAvailability.UNAVAILABLE)
                 self.assertFalse(result.creation_allowed)
-                self.assertIn(str(failure), result.message)
+                self.assertEqual(
+                    result.message,
+                    "Kubernetes API is temporarily unavailable",
+                )
 
     def test_no_schedule_taint_excluding_general_workloads_is_not_capacity(self) -> None:
         core_v1_api = MagicMock()

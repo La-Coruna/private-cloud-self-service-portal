@@ -19,12 +19,6 @@ DEFAULT_RESOURCE_QUOTA_HARD = {
 
 def load_kube_config() -> None:
     settings = get_settings()
-    if getattr(settings, "kube_auth_mode", "local") == "local":
-        if settings.kube_context:
-            config.load_kube_config(context=settings.kube_context)
-            return
-        config.load_incluster_config()
-        return
     api_client = build_api_client(settings)
     client.Configuration.set_default(api_client.configuration)
 

@@ -2,6 +2,7 @@ import base64
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
+from kubernetes import client
 
 from app.config import Settings
 from app.k8s_auth import CLOUD_PLATFORM_SCOPE, build_api_client
@@ -111,13 +112,19 @@ class KubernetesAuthenticationTests(unittest.TestCase):
             self.addCleanup(ca_path.unlink, missing_ok=True)
             credentials.expired = True
             credentials.valid = False
+            transport_response = object()
+            api_client.rest_client.GET = MagicMock(return_value=transport_response)
 
-            authorization = api_client.configuration.get_api_key_with_prefix(
-                "authorization"
+            operation_response = client.CoreV1Api(api_client=api_client).list_namespace(
+                _preload_content=False
             )
 
-        self.assertEqual(authorization, "Bearer refreshed-token")
+        self.assertIs(operation_response, transport_response)
         self.assertEqual(credentials.refresh_calls, [refresh_request])
+        self.assertEqual(
+            api_client.rest_client.GET.call_args.kwargs["headers"]["authorization"],
+            "Bearer refreshed-token",
+        )
         self.assertEqual(
             api_client.configuration.api_key["authorization"],
             "refreshed-token",

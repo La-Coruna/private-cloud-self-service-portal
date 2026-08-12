@@ -1305,35 +1305,37 @@ class ProjectApiTests(unittest.TestCase):
 class KubernetesConfigTests(unittest.TestCase):
     @patch("app.k8s_client.config.load_incluster_config")
     @patch("app.k8s_client.config.load_kube_config")
+    @patch("app.k8s_client.client.Configuration.set_default")
+    @patch("app.k8s_client.build_api_client")
     @patch("app.k8s_client.get_settings")
-    def test_load_kube_config_uses_named_context_when_present(
+    def test_shared_entry_always_uses_named_context_api_client_builder(
         self,
         mock_get_settings: MagicMock,
+        mock_build_api_client: MagicMock,
+        mock_set_default: MagicMock,
         mock_load_kube_config: MagicMock,
         mock_load_incluster_config: MagicMock,
     ) -> None:
-        mock_get_settings.return_value = SimpleNamespace(kube_context="kind-portal-dev")
+        for kube_context in ("kind-portal-dev", ""):
+            with self.subTest(kube_context=kube_context):
+                settings = SimpleNamespace(
+                    kube_auth_mode="local",
+                    kube_context=kube_context,
+                )
+                configuration = object()
+                mock_get_settings.return_value = settings
+                mock_build_api_client.return_value = SimpleNamespace(
+                    configuration=configuration
+                )
 
-        load_kube_config()
+                load_kube_config()
 
-        mock_load_kube_config.assert_called_once_with(context="kind-portal-dev")
-        mock_load_incluster_config.assert_not_called()
-
-    @patch("app.k8s_client.config.load_incluster_config")
-    @patch("app.k8s_client.config.load_kube_config")
-    @patch("app.k8s_client.get_settings")
-    def test_load_kube_config_uses_incluster_config_when_context_is_empty(
-        self,
-        mock_get_settings: MagicMock,
-        mock_load_kube_config: MagicMock,
-        mock_load_incluster_config: MagicMock,
-    ) -> None:
-        mock_get_settings.return_value = SimpleNamespace(kube_context="")
-
-        load_kube_config()
-
-        mock_load_incluster_config.assert_called_once()
-        mock_load_kube_config.assert_not_called()
+                mock_build_api_client.assert_called_once_with(settings)
+                mock_set_default.assert_called_once_with(configuration)
+                mock_load_kube_config.assert_not_called()
+                mock_load_incluster_config.assert_not_called()
+                mock_build_api_client.reset_mock()
+                mock_set_default.reset_mock()
 
 
 class KubernetesNamespaceTests(unittest.TestCase):

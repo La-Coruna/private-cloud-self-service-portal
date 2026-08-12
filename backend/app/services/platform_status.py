@@ -1,11 +1,29 @@
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 
+from google.auth.exceptions import GoogleAuthError
 from kubernetes import client
+from kubernetes.client import ApiException
+from kubernetes.config.config_exception import ConfigException
+from requests.exceptions import RequestException
+from urllib3.exceptions import HTTPError
 
 from app.config import Settings, get_settings
 from app.domain import PlatformAvailability, utc_now
 from app.k8s_auth import build_api_client
+
+
+logger = logging.getLogger(__name__)
+PLATFORM_UNAVAILABLE_MESSAGE = "Kubernetes API is temporarily unavailable"
+EXPECTED_PLATFORM_ERRORS = (
+    GoogleAuthError,
+    RequestException,
+    HTTPError,
+    ApiException,
+    ConfigException,
+    ConnectionError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +78,11 @@ class PlatformStatusService:
         checked_at = utc_now()
         try:
             nodes = self._get_core_v1_api().list_node()
-        except Exception as exc:
+        except EXPECTED_PLATFORM_ERRORS:
+            logger.warning("Kubernetes platform status check failed", exc_info=True)
             return PlatformStatus(
                 status=PlatformAvailability.UNAVAILABLE,
-                message=f"Kubernetes API connection failed: {exc}",
+                message=PLATFORM_UNAVAILABLE_MESSAGE,
                 creation_allowed=False,
                 checked_at=checked_at,
             )
@@ -74,13 +93,13 @@ class PlatformStatusService:
         if usable_node_count:
             return PlatformStatus(
                 status=PlatformAvailability.AVAILABLE,
-                message=f"GKE has {usable_node_count} Ready schedulable node(s)",
+                message=f"Platform has {usable_node_count} Ready schedulable node(s)",
                 creation_allowed=True,
                 checked_at=checked_at,
             )
         return PlatformStatus(
             status=PlatformAvailability.RECOVERING,
-            message="GKE is reachable but has no Ready schedulable nodes",
+            message="Platform is reachable but has no Ready schedulable nodes",
             creation_allowed=False,
             checked_at=checked_at,
         )
