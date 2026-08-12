@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
+import type { AuditLog, PlatformStatus } from './lib/types'
 
 const apiMocks = vi.hoisted(() => {
   const project = {
@@ -29,7 +30,7 @@ const apiMocks = vi.hoisted(() => {
   return {
     createProject: vi.fn(),
     deleteProject: vi.fn(() => Promise.resolve(project)),
-    getAuditLogs: vi.fn(() => Promise.resolve([])),
+    getAuditLogs: vi.fn((): Promise<AuditLog[]> => Promise.resolve([])),
     getEvents: vi.fn(() => Promise.resolve([])),
     getPods: vi.fn(() =>
       Promise.resolve([
@@ -56,6 +57,14 @@ const apiMocks = vi.hoisted(() => {
     ),
     getProject: vi.fn(() => Promise.resolve(project)),
     getProjects: vi.fn(() => Promise.resolve([project])),
+    getPlatformStatus: vi.fn((): Promise<PlatformStatus> =>
+      Promise.resolve({
+        status: 'AVAILABLE',
+        message: 'GKE workload capacity is available',
+        creation_allowed: true,
+        checked_at: '2026-08-12T10:00:00',
+      }),
+    ),
     syncProjectStatus: vi.fn(() => Promise.resolve(project)),
   }
 })
@@ -79,6 +88,10 @@ function renderApp(path = '/projects') {
 describe('project dashboard routes', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('renders the project list with ingress information', async () => {
@@ -138,5 +151,111 @@ describe('project dashboard routes', () => {
     await user.click(screen.getByRole('button', { name: /Refresh status/i }))
 
     await waitFor(() => expect(apiMocks.syncProjectStatus).toHaveBeenCalledWith('demo-api-staging'))
+  })
+
+  it('shows recovery status and disables project creation while GKE workloads recover', async () => {
+    apiMocks.getPlatformStatus.mockResolvedValueOnce({
+      status: 'RECOVERING',
+      message: 'Ready nodes are not available yet',
+      creation_allowed: false,
+      checked_at: '2026-08-12T10:00:00',
+    })
+
+    renderApp('/projects/new')
+
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('GKE 워크로드 복구 중')
+    expect(banner).toHaveTextContent('Ready nodes are not available yet')
+    expect(banner).toHaveTextContent('2026')
+    expect(screen.getByRole('button', { name: '생성' })).toBeDisabled()
+  })
+
+  it('keeps project and audit data visible when Pod data is temporarily unavailable', async () => {
+    apiMocks.getPods.mockRejectedValueOnce({
+      isAxiosError: true,
+      message: 'Request failed',
+      response: {
+        status: 503,
+        data: {
+          error: {
+            code: 'GKE_UNAVAILABLE',
+            message: 'GKE 상태를 일시적으로 확인할 수 없습니다.',
+            detail: 'Kubernetes API connection failed',
+          },
+        },
+      },
+    })
+    apiMocks.getAuditLogs.mockResolvedValueOnce([
+      {
+        id: 'audit-1',
+        project_id: 'demo-api-staging',
+        action: 'PROJECT_CREATED',
+        status: 'SUCCEEDED',
+        message: 'Project saved in Firestore',
+        created_at: '2026-07-11T09:00:00',
+      },
+    ])
+
+    renderApp('/projects/demo-api-staging')
+
+    expect(await screen.findByRole('heading', { name: 'demo-api' })).toBeInTheDocument()
+    expect(await screen.findByText('PROJECT_CREATED')).toBeInTheDocument()
+    expect(screen.getByText(/Pod 상태를 일시적으로 확인할 수 없음/)).toBeInTheDocument()
+  })
+
+  it('disables delete and sync only when the platform is unavailable', async () => {
+    apiMocks.getPlatformStatus
+      .mockResolvedValueOnce({
+        status: 'UNAVAILABLE',
+        message: 'Kubernetes API is temporarily unavailable',
+        creation_allowed: false,
+        checked_at: '2026-08-12T10:00:00',
+      })
+      .mockResolvedValueOnce({
+        status: 'RECOVERING',
+        message: 'Ready nodes are not available yet',
+        creation_allowed: false,
+        checked_at: '2026-08-12T10:00:15',
+      })
+
+    const unavailable = renderApp('/projects/demo-api-staging')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Kubernetes API is temporarily unavailable')
+    expect(screen.getByRole('button', { name: 'Refresh status' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled()
+
+    unavailable.unmount()
+    renderApp('/projects/demo-api-staging')
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Ready nodes are not available yet')
+    expect(screen.getByRole('button', { name: 'Refresh status' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled()
+  })
+
+  it('removes the recovery banner after the 15-second platform status poll succeeds', async () => {
+    vi.useFakeTimers()
+    apiMocks.getPlatformStatus.mockResolvedValueOnce({
+      status: 'RECOVERING',
+      message: 'Ready nodes are not available yet',
+      creation_allowed: false,
+      checked_at: '2026-08-12T10:00:00',
+    })
+
+    renderApp('/projects')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(screen.getByRole('status')).toHaveTextContent('GKE 워크로드 복구 중')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(1)
+    })
+
+    expect(apiMocks.getPlatformStatus).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })

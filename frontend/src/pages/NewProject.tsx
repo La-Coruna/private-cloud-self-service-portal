@@ -22,7 +22,11 @@ const initialForm: ProjectCreatePayload = {
 
 const rulesPanelId = 'demo-rules-panel'
 
-export function NewProjectPage() {
+interface NewProjectPageProps {
+  creationAllowed: boolean
+}
+
+export function NewProjectPage({ creationAllowed }: NewProjectPageProps) {
   const [form, setForm] = useState<ProjectCreatePayload>(initialForm)
   const [rulesOpen, setRulesOpen] = useState(false)
   const navigate = useNavigate()
@@ -128,7 +132,7 @@ export function NewProjectPage() {
         </label>
         {normalizedError && <div className="span-2"><ErrorCard error={normalizedError} /></div>}
         <div className="form-actions span-2">
-          <button className="primary-action" type="submit" disabled={mutation.isPending}>
+          <button className="primary-action" type="submit" disabled={!creationAllowed || mutation.isPending}>
             {mutation.isPending ? '\uc0dd\uc131 \uc911' : '\uc0dd\uc131'}
           </button>
         </div>

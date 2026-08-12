@@ -388,3 +388,35 @@ select {
 .error-card p {
   line-height: 1.5;
 }
+
+.platform-status-banner {
+  align-items: center;
+  background: #fff7db;
+  border-bottom: 1px solid #e8c865;
+  color: #664d00;
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+  padding: 14px 28px;
+}
+
+.platform-status-banner p {
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.platform-status-banner time {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.platform-status-unavailable {
+  background: #fff1f0;
+  border-color: #ffb4aa;
+  color: #7f1d1d;
+}
+
+.gke-unavailable-notice {
+  color: #5b6b7b;
+}

@@ -5,13 +5,24 @@ import { QueryState } from '../components/QueryState'
 import { StatusBadge } from '../components/StatusBadge'
 import { deleteProject, getAuditLogs, getEvents, getPods, getProject, syncProjectStatus } from '../lib/api'
 import { formatKstDateTimeWithLabel } from '../lib/date'
+import { normalizeApiError } from '../lib/error'
 import { textOrDash } from '../lib/format'
+import type { PlatformAvailability } from '../lib/types'
 
-export function ProjectDetailPage() {
+interface ProjectDetailPageProps {
+  platformStatus?: PlatformAvailability
+}
+
+function isGkeUnavailable(error: unknown): boolean {
+  return normalizeApiError(error).code === 'GKE_UNAVAILABLE'
+}
+
+export function ProjectDetailPage({ platformStatus }: ProjectDetailPageProps) {
   const { id } = useParams()
   const projectId = id ?? ''
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const platformUnavailable = platformStatus === 'UNAVAILABLE'
 
   const projectQuery = useQuery({ queryKey: ['project', projectId], queryFn: () => getProject(projectId), enabled: projectId.length > 0 })
   const podsQuery = useQuery({ queryKey: ['project', projectId, 'pods'], queryFn: () => getPods(projectId), enabled: projectId.length > 0 })
@@ -55,10 +66,10 @@ export function ProjectDetailPage() {
         </div>
         <div className="action-row">
           <Link className="secondary-action" to="/projects">Back to list</Link>
-          <button className="secondary-action" type="button" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending || deleteMutation.isPending}>
+          <button className="secondary-action" type="button" onClick={() => syncMutation.mutate()} disabled={platformUnavailable || syncMutation.isPending || deleteMutation.isPending}>
             {syncMutation.isPending ? 'Refreshing' : 'Refresh status'}
           </button>
-          <button className="danger-action" type="button" onClick={confirmDelete} disabled={deleteMutation.isPending || syncMutation.isPending}>
+          <button className="danger-action" type="button" onClick={confirmDelete} disabled={platformUnavailable || deleteMutation.isPending || syncMutation.isPending}>
             Delete
           </button>
         </div>
@@ -85,24 +96,32 @@ export function ProjectDetailPage() {
       <div className="detail-grid">
         <section className="data-panel">
           <h2>Pod status</h2>
-          <QueryState isLoading={podsQuery.isLoading} isError={podsQuery.isError} error={podsQuery.error}>
-            {(podsQuery.data ?? []).length === 0 ? <div className="notice">No Pod data.</div> : (
-              <div className="table-wrap compact"><table><thead><tr><th>name</th><th>phase</th><th>node</th><th>Started at (KST)</th><th>containers</th></tr></thead><tbody>
-                {(podsQuery.data ?? []).map((pod) => <tr key={pod.name}><td className="mono">{pod.name}</td><td>{pod.phase}</td><td>{textOrDash(pod.node_name)}</td><td>{formatKstDateTimeWithLabel(pod.start_time)}</td><td>{pod.containers.map((container) => `${container.name}:${container.state}${container.reason ? `(${container.reason})` : ''}`).join(', ')}</td></tr>)}
-              </tbody></table></div>
-            )}
-          </QueryState>
+          {podsQuery.isError && isGkeUnavailable(podsQuery.error) ? (
+            <div className="notice gke-unavailable-notice">Pod 상태를 일시적으로 확인할 수 없음</div>
+          ) : (
+            <QueryState isLoading={podsQuery.isLoading} isError={podsQuery.isError} error={podsQuery.error}>
+              {(podsQuery.data ?? []).length === 0 ? <div className="notice">No Pod data.</div> : (
+                <div className="table-wrap compact"><table><thead><tr><th>name</th><th>phase</th><th>node</th><th>Started at (KST)</th><th>containers</th></tr></thead><tbody>
+                  {(podsQuery.data ?? []).map((pod) => <tr key={pod.name}><td className="mono">{pod.name}</td><td>{pod.phase}</td><td>{textOrDash(pod.node_name)}</td><td>{formatKstDateTimeWithLabel(pod.start_time)}</td><td>{pod.containers.map((container) => `${container.name}:${container.state}${container.reason ? `(${container.reason})` : ''}`).join(', ')}</td></tr>)}
+                </tbody></table></div>
+              )}
+            </QueryState>
+          )}
         </section>
 
         <section className="data-panel">
           <h2>Kubernetes Event</h2>
-          <QueryState isLoading={eventsQuery.isLoading} isError={eventsQuery.isError} error={eventsQuery.error}>
-            {(eventsQuery.data ?? []).length === 0 ? <div className="notice">No Event data.</div> : (
-              <div className="table-wrap compact"><table><thead><tr><th>reason</th><th>object</th><th>message</th><th>Time (KST)</th></tr></thead><tbody>
-                {(eventsQuery.data ?? []).map((event, index) => <tr key={`${event.reason}-${index}`}><td>{textOrDash(event.reason)}</td><td className="mono">{textOrDash(event.involved_object_name)}</td><td>{textOrDash(event.message)}</td><td>{formatKstDateTimeWithLabel(event.last_timestamp ?? event.event_time ?? event.first_timestamp)}</td></tr>)}
-              </tbody></table></div>
-            )}
-          </QueryState>
+          {eventsQuery.isError && isGkeUnavailable(eventsQuery.error) ? (
+            <div className="notice gke-unavailable-notice">Event 상태를 일시적으로 확인할 수 없음</div>
+          ) : (
+            <QueryState isLoading={eventsQuery.isLoading} isError={eventsQuery.isError} error={eventsQuery.error}>
+              {(eventsQuery.data ?? []).length === 0 ? <div className="notice">No Event data.</div> : (
+                <div className="table-wrap compact"><table><thead><tr><th>reason</th><th>object</th><th>message</th><th>Time (KST)</th></tr></thead><tbody>
+                  {(eventsQuery.data ?? []).map((event, index) => <tr key={`${event.reason}-${index}`}><td>{textOrDash(event.reason)}</td><td className="mono">{textOrDash(event.involved_object_name)}</td><td>{textOrDash(event.message)}</td><td>{formatKstDateTimeWithLabel(event.last_timestamp ?? event.event_time ?? event.first_timestamp)}</td></tr>)}
+                </tbody></table></div>
+              )}
+            </QueryState>
+          )}
         </section>
       </div>
 
