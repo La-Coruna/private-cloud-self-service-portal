@@ -42,6 +42,7 @@ def _project_to_dict(project: Project) -> dict[str, Any]:
         "capacity_claimed": project.capacity_claimed,
         "created_at": _to_firestore_datetime(project.created_at),
         "updated_at": _to_firestore_datetime(project.updated_at),
+        "owner_token": project.owner_token,
     }
 
 
@@ -64,6 +65,7 @@ def _project_from_dict(data: dict[str, Any]) -> Project:
         capacity_claimed=data["capacity_claimed"],
         created_at=_from_firestore_datetime(data["created_at"]),
         updated_at=_from_firestore_datetime(data["updated_at"]),
+        owner_token=data.get("owner_token", ""),
     )
 
 

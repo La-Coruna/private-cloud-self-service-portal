@@ -46,6 +46,7 @@ class Project:
     capacity_claimed: bool
     created_at: datetime
     updated_at: datetime
+    owner_token: str = ""
 
     @classmethod
     def new(cls, request: "ProjectCreateRequest", namespace: str) -> "Project":
@@ -68,6 +69,7 @@ class Project:
             capacity_claimed=False,
             created_at=now,
             updated_at=now,
+            owner_token=uuid4().hex,
         )
 
 

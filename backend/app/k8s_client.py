@@ -10,6 +10,7 @@ from app.k8s_auth import build_api_client
 
 
 MANAGED_BY = "self-service-portal"
+OWNER_TOKEN_LABEL = "platform.io/owner-token"
 RESOURCE_QUOTA_NAME = "portal-resource-quota"
 DEFAULT_RESOURCE_QUOTA_HARD = {
     "requests.cpu": "4",
@@ -40,12 +41,15 @@ def load_kube_config() -> None:
     client.Configuration.set_default(api_client.configuration)
 
 
-def build_common_labels(project_id: str, service_name: str, environment: str) -> dict[str, str]:
+def build_common_labels(
+    project_id: str, service_name: str, environment: str, owner_token: str
+) -> dict[str, str]:
     return {
         "app.kubernetes.io/managed-by": MANAGED_BY,
         "app.kubernetes.io/name": service_name,
         "platform.io/environment": environment,
         "platform.io/project-id": str(project_id),
+        OWNER_TOKEN_LABEL: owner_token,
     }
 
 
@@ -86,6 +90,65 @@ def _api_error_result(resource: str, exc: ApiException) -> dict:
         "message": exc.reason,
         "detail": exc.body,
     }
+
+
+def _is_expected_subset(expected, actual) -> bool:
+    if expected is None:
+        return True
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(
+            key in actual and _is_expected_subset(value, actual[key])
+            for key, value in expected.items()
+            if value is not None
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(expected) == len(actual)
+            and all(
+                _is_expected_subset(expected_item, actual_item)
+                for expected_item, actual_item in zip(expected, actual)
+            )
+        )
+    return str(expected) == str(actual)
+
+
+def _resource_matches(actual, desired) -> bool:
+    serializer = client.ApiClient()
+    actual_data = serializer.sanitize_for_serialization(actual)
+    desired_data = serializer.sanitize_for_serialization(desired)
+    desired_metadata = desired_data.get("metadata", {})
+    expected = {
+        "metadata": {
+            "name": desired_metadata.get("name"),
+            "namespace": desired_metadata.get("namespace"),
+            "labels": desired_metadata.get("labels", {}),
+        },
+        "spec": desired_data.get("spec"),
+    }
+    return _is_expected_subset(expected, actual_data)
+
+
+def _ownership_conflict(resource: str, name: str) -> dict:
+    return {
+        "status": "error",
+        "resource": resource,
+        "name": name,
+        "reason": "ownership_conflict",
+        "message": "Existing Kubernetes resource is not owned by this project or its spec differs",
+    }
+
+
+def _conflict_result(resource: str, name: str, desired, read_existing) -> dict:
+    try:
+        existing = read_existing()
+    except ApiException as exc:
+        return _api_error_result(resource, exc)
+    if not _resource_matches(existing, desired):
+        return _ownership_conflict(resource, name)
+    return {"status": "already_exists", "resource": resource, "name": name}
 
 
 def _is_not_found(exc: ApiException) -> bool:
@@ -132,20 +195,29 @@ def create_namespace(
     project_id: str,
     service_name: str,
     environment: str,
+    owner_token: str,
 ) -> dict:
     try:
         load_kube_config()
         body = client.V1Namespace(
             metadata=client.V1ObjectMeta(
                 name=namespace,
-                labels=build_common_labels(project_id, service_name, environment),
+                labels=build_common_labels(
+                    project_id, service_name, environment, owner_token
+                ),
             )
         )
-        client.CoreV1Api().create_namespace(body)
+        api = client.CoreV1Api()
+        api.create_namespace(body)
         return {"status": "created", "namespace": namespace}
     except ApiException as exc:
         if exc.status == 409:
-            return {"status": "already_exists", "namespace": namespace}
+            result = _conflict_result(
+                "namespace", namespace, body, lambda: api.read_namespace(name=namespace)
+            )
+            if result["status"] == "already_exists":
+                return {"status": "already_exists", "namespace": namespace}
+            return result
         return {
             "status": "error",
             "message": exc.reason,
@@ -161,6 +233,7 @@ def create_resource_quota(
     project_id: str,
     service_name: str,
     environment: str,
+    owner_token: str = "",
 ) -> dict:
     try:
         load_kube_config()
@@ -170,11 +243,14 @@ def create_resource_quota(
             metadata=client.V1ObjectMeta(
                 name=RESOURCE_QUOTA_NAME,
                 namespace=namespace,
-                labels=build_common_labels(project_id, service_name, environment),
+                labels=build_common_labels(
+                    project_id, service_name, environment, owner_token
+                ),
             ),
             spec=client.V1ResourceQuotaSpec(hard=DEFAULT_RESOURCE_QUOTA_HARD),
         )
-        client.CoreV1Api().create_namespaced_resource_quota(
+        api = client.CoreV1Api()
+        api.create_namespaced_resource_quota(
             namespace=namespace,
             body=resource_quota,
         )
@@ -185,11 +261,14 @@ def create_resource_quota(
         }
     except ApiException as exc:
         if exc.status == 409:
-            return {
-                "status": "already_exists",
-                "resource": "resourcequota",
-                "name": RESOURCE_QUOTA_NAME,
-            }
+            return _conflict_result(
+                "resourcequota",
+                RESOURCE_QUOTA_NAME,
+                resource_quota,
+                lambda: api.read_namespaced_resource_quota(
+                    name=RESOURCE_QUOTA_NAME, namespace=namespace
+                ),
+            )
         return _api_error_result("resourcequota", exc)
     except Exception as exc:
         return {"status": "error", "resource": "resourcequota", "message": str(exc)}
@@ -207,6 +286,7 @@ def create_deployment(
     cpu_limit: str,
     memory_request: str,
     memory_limit: str,
+    owner_token: str = "",
 ) -> dict:
     try:
         load_kube_config()
@@ -215,7 +295,9 @@ def create_deployment(
             metadata=client.V1ObjectMeta(
                 name=service_name,
                 namespace=namespace,
-                labels=build_common_labels(project_id, service_name, environment),
+                labels=build_common_labels(
+                    project_id, service_name, environment, owner_token
+                ),
             ),
             spec=client.V1DeploymentSpec(
                 replicas=replicas,
@@ -244,18 +326,22 @@ def create_deployment(
                 ),
             ),
         )
-        client.AppsV1Api().create_namespaced_deployment(
+        api = client.AppsV1Api()
+        api.create_namespaced_deployment(
             namespace=namespace,
             body=deployment,
         )
         return {"status": "created", "resource": "deployment", "name": service_name}
     except ApiException as exc:
         if exc.status == 409:
-            return {
-                "status": "already_exists",
-                "resource": "deployment",
-                "name": service_name,
-            }
+            return _conflict_result(
+                "deployment",
+                service_name,
+                deployment,
+                lambda: api.read_namespaced_deployment(
+                    name=service_name, namespace=namespace
+                ),
+            )
         return _api_error_result("deployment", exc)
     except Exception as exc:
         return {"status": "error", "resource": "deployment", "message": str(exc)}
@@ -267,6 +353,7 @@ def create_service(
     project_id: str,
     service_name: str,
     environment: str,
+    owner_token: str = "",
 ) -> dict:
     service_name_with_suffix = f"{service_name}-svc"
     try:
@@ -275,7 +362,9 @@ def create_service(
             metadata=client.V1ObjectMeta(
                 name=service_name_with_suffix,
                 namespace=namespace,
-                labels=build_common_labels(project_id, service_name, environment),
+                labels=build_common_labels(
+                    project_id, service_name, environment, owner_token
+                ),
             ),
             spec=client.V1ServiceSpec(
                 type="ClusterIP",
@@ -290,7 +379,8 @@ def create_service(
                 ],
             ),
         )
-        client.CoreV1Api().create_namespaced_service(
+        api = client.CoreV1Api()
+        api.create_namespaced_service(
             namespace=namespace,
             body=service,
         )
@@ -301,11 +391,14 @@ def create_service(
         }
     except ApiException as exc:
         if exc.status == 409:
-            return {
-                "status": "already_exists",
-                "resource": "service",
-                "name": service_name_with_suffix,
-            }
+            return _conflict_result(
+                "service",
+                service_name_with_suffix,
+                service,
+                lambda: api.read_namespaced_service(
+                    name=service_name_with_suffix, namespace=namespace
+                ),
+            )
         return _api_error_result("service", exc)
     except Exception as exc:
         return {"status": "error", "resource": "service", "message": str(exc)}
@@ -318,6 +411,7 @@ def create_ingress(
     service_name: str,
     environment: str,
     host: str,
+    owner_token: str = "",
 ) -> dict:
     settings = get_settings()
     ingress_name = f"{service_name}-ingress"
@@ -330,7 +424,9 @@ def create_ingress(
             metadata=client.V1ObjectMeta(
                 name=ingress_name,
                 namespace=namespace,
-                labels=build_common_labels(project_id, service_name, environment),
+                labels=build_common_labels(
+                    project_id, service_name, environment, owner_token
+                ),
             ),
             spec=client.V1IngressSpec(
                 ingress_class_name=settings.app_ingress_class_name,
@@ -355,21 +451,163 @@ def create_ingress(
                 ]
             ),
         )
-        client.NetworkingV1Api().create_namespaced_ingress(
+        api = client.NetworkingV1Api()
+        api.create_namespaced_ingress(
             namespace=namespace,
             body=ingress,
         )
         return {"status": "created", "resource": "ingress", "name": ingress_name}
     except ApiException as exc:
         if exc.status == 409:
-            return {
-                "status": "already_exists",
-                "resource": "ingress",
-                "name": ingress_name,
-            }
+            return _conflict_result(
+                "ingress",
+                ingress_name,
+                ingress,
+                lambda: api.read_namespaced_ingress(
+                    name=ingress_name, namespace=namespace
+                ),
+            )
         return _api_error_result("ingress", exc)
     except Exception as exc:
         return {"status": "error", "resource": "ingress", "message": str(exc)}
+
+
+
+def verify_project_resources(
+    *,
+    namespace: str,
+    project_id: str,
+    service_name: str,
+    environment: str,
+    owner_token: str,
+    image: str,
+    replicas: int,
+    cpu_request: str,
+    cpu_limit: str,
+    memory_request: str,
+    memory_limit: str,
+    ingress_host: str | None,
+) -> dict:
+    labels = build_common_labels(project_id, service_name, environment, owner_token)
+    selector = build_selector_labels(project_id, service_name)
+    expected = [
+        (
+            "namespace",
+            namespace,
+            lambda: client.CoreV1Api().read_namespace(name=namespace),
+            {"metadata": {"name": namespace, "labels": labels}},
+        ),
+        (
+            "resourcequota",
+            RESOURCE_QUOTA_NAME,
+            lambda: client.CoreV1Api().read_namespaced_resource_quota(
+                name=RESOURCE_QUOTA_NAME, namespace=namespace
+            ),
+            {
+                "metadata": {"name": RESOURCE_QUOTA_NAME, "namespace": namespace, "labels": labels},
+                "spec": {"hard": DEFAULT_RESOURCE_QUOTA_HARD},
+            },
+        ),
+        (
+            "deployment",
+            service_name,
+            lambda: client.AppsV1Api().read_namespaced_deployment(
+                name=service_name, namespace=namespace
+            ),
+            {
+                "metadata": {"name": service_name, "namespace": namespace, "labels": labels},
+                "spec": {
+                    "replicas": replicas,
+                    "selector": {"matchLabels": selector},
+                    "template": {
+                        "metadata": {"labels": selector},
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": service_name,
+                                    "image": image,
+                                    "ports": [{"containerPort": 80}],
+                                    "resources": {
+                                        "requests": {"cpu": cpu_request, "memory": memory_request},
+                                        "limits": {"cpu": cpu_limit, "memory": memory_limit},
+                                    },
+                                }
+                            ]
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "service",
+            f"{service_name}-svc",
+            lambda: client.CoreV1Api().read_namespaced_service(
+                name=f"{service_name}-svc", namespace=namespace
+            ),
+            {
+                "metadata": {"name": f"{service_name}-svc", "namespace": namespace, "labels": labels},
+                "spec": {
+                    "type": "ClusterIP",
+                    "selector": selector,
+                    "ports": [{"name": "http", "port": 80, "targetPort": 80, "protocol": "TCP"}],
+                },
+            },
+        ),
+    ]
+    if ingress_host:
+        expected.append(
+            (
+                "ingress",
+                f"{service_name}-ingress",
+                lambda: client.NetworkingV1Api().read_namespaced_ingress(
+                    name=f"{service_name}-ingress", namespace=namespace
+                ),
+                {
+                    "metadata": {
+                        "name": f"{service_name}-ingress",
+                        "namespace": namespace,
+                        "labels": labels,
+                    },
+                    "spec": {
+                        "ingressClassName": get_settings().app_ingress_class_name,
+                        "rules": [
+                            {
+                                "host": ingress_host,
+                                "http": {
+                                    "paths": [
+                                        {
+                                            "path": "/",
+                                            "pathType": "Prefix",
+                                            "backend": {
+                                                "service": {
+                                                    "name": f"{service_name}-svc",
+                                                    "port": {"number": 80},
+                                                }
+                                            },
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+
+    load_kube_config()
+    serializer = client.ApiClient()
+    for resource, name, reader, desired in expected:
+        try:
+            actual = serializer.sanitize_for_serialization(reader())
+        except ApiException as exc:
+            if exc.status == 404:
+                if resource == "namespace":
+                    return {"status": "verified"}
+                continue
+            return _api_error_result(resource, exc)
+        if not _is_expected_subset(desired, actual):
+            return _ownership_conflict(resource, name)
+    return {"status": "verified"}
 
 
 def delete_ingress(namespace: str, service_name: str) -> dict:

@@ -1,3 +1,4 @@
+import copy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 import inspect
@@ -24,10 +25,35 @@ from app.k8s_client import (
     list_project_events,
     list_project_pods,
     load_kube_config,
+    verify_project_resources,
 )
 
 
 PROJECT_ID = "demo-api-staging"
+OWNER_TOKEN = "owner-token-123"
+
+
+class FakeNamespaceCluster:
+    def __init__(self, namespaces):
+        self.namespaces = copy.deepcopy(namespaces)
+        self.delete_calls = []
+
+    def create_namespace(self, body):
+        name = body.metadata.name
+        if name in self.namespaces:
+            raise ApiException(status=409, reason="Conflict")
+        self.namespaces[name] = copy.deepcopy(body)
+
+    def read_namespace(self, name):
+        if name not in self.namespaces:
+            raise ApiException(status=404, reason="Not Found")
+        return copy.deepcopy(self.namespaces[name])
+
+    def delete_namespace(self, name):
+        self.delete_calls.append(name)
+        if name not in self.namespaces:
+            raise ApiException(status=404, reason="Not Found")
+        del self.namespaces[name]
 
 
 class KubernetesClientTests(unittest.TestCase):
@@ -66,26 +92,86 @@ class KubernetesClientTests(unittest.TestCase):
     def test_create_namespace_sends_string_id_labels(self, load_config, core_api) -> None:
         api = core_api.return_value
 
-        result = create_namespace(PROJECT_ID, PROJECT_ID, "api", "staging")
+        result = create_namespace(
+            PROJECT_ID, PROJECT_ID, "api", "staging", OWNER_TOKEN
+        )
 
         self.assertEqual(result, {"status": "created", "namespace": PROJECT_ID})
         body = api.create_namespace.call_args.args[0]
         self.assertEqual(body.metadata.name, PROJECT_ID)
         self.assertEqual(body.metadata.labels["platform.io/project-id"], PROJECT_ID)
         self.assertEqual(body.metadata.labels["platform.io/environment"], "staging")
+        self.assertEqual(body.metadata.labels["platform.io/owner-token"], OWNER_TOKEN)
         load_config.assert_called_once_with()
 
     @patch("app.k8s_client.client.CoreV1Api")
     @patch("app.k8s_client.load_kube_config")
     def test_create_namespace_maps_409_to_already_exists(self, load_config, core_api) -> None:
-        core_api.return_value.create_namespace.side_effect = ApiException(
-            status=409,
-            reason="Conflict",
+        api = core_api.return_value
+        created = {}
+
+        def conflict(body):
+            created["body"] = body
+            raise ApiException(status=409, reason="Conflict")
+
+        api.create_namespace.side_effect = conflict
+        api.read_namespace.side_effect = lambda name: created["body"]
+
+        result = create_namespace(
+            PROJECT_ID, PROJECT_ID, "api", "staging", OWNER_TOKEN
         )
 
-        result = create_namespace(PROJECT_ID, PROJECT_ID, "api", "staging")
-
         self.assertEqual(result, {"status": "already_exists", "namespace": PROJECT_ID})
+
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_legacy_namespace_conflict_is_neither_adopted_nor_deleted(
+        self,
+        load_config,
+        core_api,
+    ) -> None:
+        legacy = {
+            PROJECT_ID: __import__("kubernetes").client.V1Namespace(
+                metadata=__import__("kubernetes").client.V1ObjectMeta(
+                    name=PROJECT_ID,
+                    labels={
+                        "app.kubernetes.io/managed-by": "legacy-portal",
+                        "platform.io/project-id": PROJECT_ID,
+                    },
+                )
+            )
+        }
+        cluster = FakeNamespaceCluster(legacy)
+        core_api.return_value = cluster
+
+        create_result = create_namespace(
+            PROJECT_ID,
+            PROJECT_ID,
+            "api",
+            "staging",
+            OWNER_TOKEN,
+        )
+        delete_result = verify_project_resources(
+            namespace=PROJECT_ID,
+            project_id=PROJECT_ID,
+            service_name="api",
+            environment="staging",
+            owner_token=OWNER_TOKEN,
+            image="nginx:1.27",
+            replicas=1,
+            cpu_request="100m",
+            cpu_limit="500m",
+            memory_request="128Mi",
+            memory_limit="512Mi",
+            ingress_host=None,
+        )
+
+        self.assertEqual(create_result["status"], "error")
+        self.assertEqual(create_result["reason"], "ownership_conflict")
+        self.assertEqual(delete_result["status"], "error")
+        self.assertEqual(delete_result["reason"], "ownership_conflict")
+        self.assertEqual(cluster.delete_calls, [])
+        self.assertEqual(cluster.namespaces, legacy)
 
     @patch("app.k8s_client.client.CoreV1Api")
     @patch("app.k8s_client.load_kube_config")
@@ -318,8 +404,16 @@ class KubernetesClientTests(unittest.TestCase):
     @patch("app.k8s_client.client.CoreV1Api")
     @patch("app.k8s_client.load_kube_config")
     def test_resource_quota_maps_409_to_already_exists(self, load_config, core_api) -> None:
-        core_api.return_value.create_namespaced_resource_quota.side_effect = ApiException(
-            status=409, reason="Conflict"
+        api = core_api.return_value
+        created = {}
+
+        def conflict(*, namespace, body):
+            created["body"] = body
+            raise ApiException(status=409, reason="Conflict")
+
+        api.create_namespaced_resource_quota.side_effect = conflict
+        api.read_namespaced_resource_quota.side_effect = (
+            lambda **kwargs: created["body"]
         )
 
         result = create_resource_quota(
@@ -339,9 +433,15 @@ class KubernetesClientTests(unittest.TestCase):
         self, settings, load_config, networking_api
     ) -> None:
         settings.return_value = SimpleNamespace(app_ingress_class_name="nginx")
-        networking_api.return_value.create_namespaced_ingress.side_effect = ApiException(
-            status=409, reason="Conflict"
-        )
+        api = networking_api.return_value
+        created = {}
+
+        def conflict(*, namespace, body):
+            created["body"] = body
+            raise ApiException(status=409, reason="Conflict")
+
+        api.create_namespaced_ingress.side_effect = conflict
+        api.read_namespaced_ingress.side_effect = lambda **kwargs: created["body"]
 
         result = create_ingress(
             namespace=PROJECT_ID,

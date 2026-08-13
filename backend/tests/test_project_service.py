@@ -35,6 +35,7 @@ class ProjectServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repository = InMemoryProjectRepository(max_active_projects=3)
         self.kubernetes = MagicMock()
+        self.kubernetes.verify_project_resources.return_value = {"status": "verified"}
         self.platform_status = MagicMock()
         self.platform_status.get_status.return_value = SimpleNamespace(
             status=PlatformAvailability.AVAILABLE,

@@ -37,6 +37,7 @@ class KubernetesGateway(Protocol):
         project_id: str,
         service_name: str,
         environment: str,
+        owner_token: str,
     ) -> dict: ...
 
     def create_resource_quota(self, **kwargs) -> dict: ...
@@ -46,6 +47,8 @@ class KubernetesGateway(Protocol):
     def create_service(self, **kwargs) -> dict: ...
 
     def create_ingress(self, **kwargs) -> dict: ...
+
+    def verify_project_resources(self, **kwargs) -> dict: ...
 
     def delete_ingress(self, namespace: str, service_name: str) -> dict: ...
 
@@ -231,6 +234,7 @@ class ProjectService:
             project.id,
             request.service_name,
             request.environment,
+            project.owner_token,
         )
         if not _is_create_success(result):
             return self._fail_create(project, result, "NAMESPACE_CREATE_FAILED")
@@ -246,6 +250,7 @@ class ProjectService:
             project_id=project.id,
             service_name=request.service_name,
             environment=request.environment,
+            owner_token=project.owner_token,
         )
         if not _is_create_success(result):
             return self._fail_create(project, result, "RESOURCE_QUOTA_CREATE_FAILED")
@@ -262,6 +267,7 @@ class ProjectService:
             service_name=request.service_name,
             environment=request.environment,
             image=request.image,
+            owner_token=project.owner_token,
             replicas=request.replicas,
             cpu_request=request.cpu_request,
             cpu_limit=request.cpu_limit,
@@ -282,6 +288,7 @@ class ProjectService:
             project_id=project.id,
             service_name=request.service_name,
             environment=request.environment,
+            owner_token=project.owner_token,
         )
         if not _is_create_success(result):
             return self._fail_create(project, result, "SERVICE_CREATE_FAILED")
@@ -303,6 +310,7 @@ class ProjectService:
                 service_name=request.service_name,
                 environment=request.environment,
                 host=ingress_host,
+                owner_token=project.owner_token,
             )
             if not _is_create_success(result):
                 return self._fail_create(project, result, "INGRESS_CREATE_FAILED")
@@ -408,6 +416,24 @@ class ProjectService:
             )
 
         self._require_gke()
+        ownership = self.kubernetes.verify_project_resources(
+            namespace=project.namespace,
+            project_id=project.id,
+            service_name=project.service_name,
+            environment=project.environment,
+            owner_token=project.owner_token,
+            image=project.image,
+            replicas=project.replicas,
+            cpu_request=project.cpu_request,
+            cpu_limit=project.cpu_limit,
+            memory_request=project.memory_request,
+            memory_limit=project.memory_limit,
+            ingress_host=project.ingress_host,
+        )
+        if ownership.get("status") != "verified":
+            raise InvalidLifecycleOperation(
+                ownership.get("message") or "Kubernetes ownership verification failed"
+            )
         project = self._save(project, status=ProjectStatus.DELETING, error_message=None)
         self._audit(
             project,
