@@ -1,7 +1,7 @@
 from dataclasses import replace
 from threading import RLock
 
-from app.domain import AuditLog, Project, ProjectStatus
+from app.domain import AuditLog, Project, ProjectStatus, utc_now
 from app.repositories.base import same_creation_spec
 
 
@@ -62,6 +62,28 @@ class InMemoryProjectRepository:
                 self._audit_logs.setdefault(created_project.id, []).append(stored_log)
             return replace(created_project)
 
+    def begin_provisioning(self, project: Project, audit: AuditLog) -> Project:
+        with self._lock:
+            current = self._projects.get(project.id)
+            if current is None:
+                raise ProjectNotFound(project.id)
+            if (
+                current.version != project.version
+                or current.status != ProjectStatus.REQUESTED
+            ):
+                raise ProjectVersionConflict(current)
+
+            provisioning = replace(
+                current,
+                status=ProjectStatus.PROVISIONING,
+                error_message=None,
+                updated_at=utc_now(),
+                version=current.version + 1,
+            )
+            self._projects[provisioning.id] = provisioning
+            self._audit_logs.setdefault(provisioning.id, []).append(replace(audit))
+            return replace(provisioning)
+
     def get_project(self, project_id: str) -> Project | None:
         with self._lock:
             project = self._projects.get(project_id)
@@ -73,6 +95,9 @@ class InMemoryProjectRepository:
 
     def save_project(self, project: Project) -> Project:
         with self._lock:
+            current = self._projects.get(project.id)
+            if current is not None and current.owner_token != project.owner_token:
+                raise ValueError("owner_token is immutable")
             saved_project = replace(project)
             self._projects[saved_project.id] = saved_project
             return replace(saved_project)
@@ -84,6 +109,8 @@ class InMemoryProjectRepository:
                 raise ProjectNotFound(project.id)
             if current.version != project.version:
                 raise ProjectVersionConflict(current)
+            if current.owner_token != project.owner_token:
+                raise ValueError("owner_token is immutable")
 
             saved_project = replace(project, version=project.version + 1)
             self._projects[saved_project.id] = saved_project

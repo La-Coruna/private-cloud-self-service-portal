@@ -57,6 +57,54 @@ class FakeNamespaceCluster:
 
 
 class KubernetesClientTests(unittest.TestCase):
+    @patch("app.k8s_client.client.CoreV1Api")
+    @patch("app.k8s_client.load_kube_config")
+    def test_empty_owner_token_cannot_adopt_conflicting_namespace(
+        self, load_config, core_api
+    ) -> None:
+        api = core_api.return_value
+        existing = __import__("kubernetes").client.V1Namespace(
+            metadata=__import__("kubernetes").client.V1ObjectMeta(
+                name=PROJECT_ID,
+                labels={
+                    "app.kubernetes.io/managed-by": "self-service-portal",
+                    "app.kubernetes.io/name": "api",
+                    "platform.io/environment": "staging",
+                    "platform.io/project-id": PROJECT_ID,
+                    "platform.io/owner-token": "",
+                },
+            )
+        )
+        api.create_namespace.side_effect = ApiException(status=409, reason="Conflict")
+        api.read_namespace.return_value = existing
+
+        result = create_namespace(PROJECT_ID, PROJECT_ID, "api", "staging", "")
+
+        self.assertEqual(result["status"], "error")
+        self.assertNotEqual(result.get("status"), "already_exists")
+
+    @patch("app.k8s_client.load_kube_config")
+    def test_empty_owner_token_cannot_verify_resources_for_delete(
+        self, load_config
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "owner_token"):
+            verify_project_resources(
+                namespace=PROJECT_ID,
+                project_id=PROJECT_ID,
+                service_name="api",
+                environment="staging",
+                owner_token=" ",
+                image="nginx:1.27",
+                replicas=1,
+                cpu_request="100m",
+                cpu_limit="500m",
+                memory_request="128Mi",
+                memory_limit="512Mi",
+                ingress_host=None,
+            )
+
+        load_config.assert_not_called()
+
     @patch("app.k8s_client.client.Configuration.set_default")
     @patch("app.k8s_client.build_api_client")
     @patch("app.k8s_client.get_settings")
@@ -181,6 +229,7 @@ class KubernetesClientTests(unittest.TestCase):
             project_id=PROJECT_ID,
             service_name="api",
             environment="staging",
+            owner_token=OWNER_TOKEN,
         )
 
         self.assertEqual(result["status"], "created")
@@ -206,6 +255,7 @@ class KubernetesClientTests(unittest.TestCase):
             cpu_limit="1",
             memory_request="256Mi",
             memory_limit="1Gi",
+            owner_token=OWNER_TOKEN,
         )
 
         self.assertEqual(result["status"], "created")
@@ -225,6 +275,7 @@ class KubernetesClientTests(unittest.TestCase):
             project_id=PROJECT_ID,
             service_name="api",
             environment="staging",
+            owner_token=OWNER_TOKEN,
         )
 
         self.assertEqual(result["name"], "api-svc")
@@ -250,6 +301,7 @@ class KubernetesClientTests(unittest.TestCase):
             service_name="api",
             environment="staging",
             host="api-staging.example.test",
+            owner_token=OWNER_TOKEN,
         )
 
         self.assertEqual(result["status"], "created")
@@ -421,6 +473,7 @@ class KubernetesClientTests(unittest.TestCase):
             project_id=PROJECT_ID,
             service_name="api",
             environment="staging",
+            owner_token=OWNER_TOKEN,
         )
 
         self.assertEqual(result["status"], "already_exists")
@@ -449,6 +502,7 @@ class KubernetesClientTests(unittest.TestCase):
             service_name="api",
             environment="staging",
             host="api-staging.example.test",
+            owner_token=OWNER_TOKEN,
         )
 
         self.assertEqual(result["status"], "already_exists")

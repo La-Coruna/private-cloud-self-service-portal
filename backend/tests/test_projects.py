@@ -46,6 +46,7 @@ def make_project(project_id: str = "demo-api-staging") -> Project:
         capacity_claimed=True,
         created_at=created_at,
         updated_at=created_at,
+        owner_token=f"owner-token-{project_id}",
     )
 
 

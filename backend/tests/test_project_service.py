@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 from app.config import Settings
 from app.domain import PlatformAvailability, Project, ProjectStatus
-from app.repositories.memory import InMemoryProjectRepository
+from app.repositories.memory import InMemoryProjectRepository, ProjectAlreadyExists
 from app.schemas import ProjectCreateRequest
 from app.services.project_service import (
     InvalidLifecycleOperation,
@@ -255,8 +255,8 @@ class ProjectServiceTests(unittest.TestCase):
         )
 
     def test_retry_resumes_requested_project_after_initial_status_save_failure(self) -> None:
-        original_save = self.repository.save_project_if_version
-        self.repository.save_project_if_version = MagicMock(
+        original_begin = self.repository.begin_provisioning
+        self.repository.begin_provisioning = MagicMock(
             side_effect=RuntimeError("transient Firestore write failure")
         )
 
@@ -274,7 +274,7 @@ class ProjectServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.kubernetes.mock_calls, [])
 
-        self.repository.save_project_if_version = original_save
+        self.repository.begin_provisioning = original_begin
         call_order: list[str] = []
         self._configure_successful_create(call_order)
 
@@ -288,6 +288,51 @@ class ProjectServiceTests(unittest.TestCase):
             ),
             1,
         )
+        self.assertEqual(
+            [log.action for log in self.repository.list_audit_logs(project_id)].count(
+                "PROJECT_PROVISIONING_STARTED"
+            ),
+            1,
+        )
+
+    def test_concurrent_identical_create_runs_one_provisioning_workflow(self) -> None:
+        call_order: list[str] = []
+        self._configure_successful_create(call_order)
+        claim_barrier = Barrier(2)
+        original_claim = self.repository.claim_capacity_and_create
+
+        def synchronized_claim(project, initial_audit):
+            claimed = original_claim(project, initial_audit)
+            claim_barrier.wait()
+            return claimed
+
+        self.repository.claim_capacity_and_create = synchronized_claim
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(self.service.create_project, make_request())
+                for _ in range(2)
+            ]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except Exception as exc:
+                    outcomes.append(exc)
+
+        self.assertEqual(sum(isinstance(item, Project) for item in outcomes), 1)
+        self.assertEqual(sum(isinstance(item, ProjectAlreadyExists) for item in outcomes), 1)
+        self.assertEqual(self.repository.active_count, 1)
+        self.assertEqual(
+            call_order,
+            ["namespace", "resourcequota", "deployment", "service"],
+        )
+        project_id = "demo-demo-api-staging"
+        actions = [
+            log.action for log in self.repository.list_audit_logs(project_id)
+        ]
+        self.assertEqual(actions.count("PROJECT_CREATE_REQUESTED"), 1)
+        self.assertEqual(actions.count("PROJECT_PROVISIONING_STARTED"), 1)
 
     def test_concurrent_deletes_allow_only_one_kubernetes_deletion_owner(self) -> None:
         project = self._create_running_project()

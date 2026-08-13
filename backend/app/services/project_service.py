@@ -5,7 +5,12 @@ from app.audit import create_audit_log
 from app.config import Settings
 from app.domain import AuditLog, PlatformAvailability, Project, ProjectStatus, utc_now
 from app.k8s_client import KubernetesUnavailableError
-from app.repositories import ProjectNotFound, ProjectRepository, ProjectVersionConflict
+from app.repositories import (
+    ProjectAlreadyExists,
+    ProjectNotFound,
+    ProjectRepository,
+    ProjectVersionConflict,
+)
 from app.schemas import ProjectCreateRequest
 
 
@@ -223,13 +228,16 @@ class ProjectService:
             initial_audit,
         )
 
-        project = self._save(project, status=ProjectStatus.PROVISIONING, error_message=None)
-        self._audit(
-            project,
-            "PROJECT_PROVISIONING_STARTED",
-            "SUCCESS",
-            "Project provisioning started",
+        provisioning_audit = AuditLog.new(
+            project_id=project.id,
+            action="PROJECT_PROVISIONING_STARTED",
+            status="SUCCESS",
+            message="Project provisioning started",
         )
+        try:
+            project = self.repository.begin_provisioning(project, provisioning_audit)
+        except ProjectVersionConflict as conflict:
+            raise ProjectAlreadyExists(conflict.current_project.id) from conflict
 
         result = self.kubernetes.create_namespace(
             namespace,

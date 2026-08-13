@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from datetime import datetime
 
 from app.domain import AuditLog, PlatformAvailability, Project, ProjectStatus, utc_now
@@ -67,6 +68,23 @@ class DomainTests(unittest.TestCase):
 
         self.assertEqual(ProjectResponse.model_validate(project).id, "demo-api-staging")
         self.assertEqual(AuditLogResponse.model_validate(audit_log).project_id, "demo-api-staging")
+
+    def test_owner_token_must_not_be_empty_or_whitespace(self) -> None:
+        project = Project.new(request=make_request(), namespace="demo-api-staging")
+
+        for invalid in ("", "   "):
+            with self.subTest(owner_token=invalid):
+                with self.assertRaisesRegex(ValueError, "owner_token"):
+                    replace(project, owner_token=invalid)
+
+    def test_owner_token_cannot_change_after_construction(self) -> None:
+        project = Project.new(request=make_request(), namespace="demo-api-staging")
+        original_token = project.owner_token
+
+        with self.assertRaisesRegex(AttributeError, "owner_token"):
+            project.owner_token = "different-owner"
+
+        self.assertEqual(project.owner_token, original_token)
 
 
 if __name__ == "__main__":

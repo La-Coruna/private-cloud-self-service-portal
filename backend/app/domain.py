@@ -46,8 +46,20 @@ class Project:
     capacity_claimed: bool
     created_at: datetime
     updated_at: datetime
-    owner_token: str = ""
+    owner_token: str
     version: int = 0
+
+    def __setattr__(self, name: str, value) -> None:
+        if name == "owner_token":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("owner_token must be a non-empty string")
+            try:
+                object.__getattribute__(self, "owner_token")
+            except AttributeError:
+                pass
+            else:
+                raise AttributeError("owner_token is immutable")
+        object.__setattr__(self, name, value)
 
     @classmethod
     def new(cls, request: "ProjectCreateRequest", namespace: str) -> "Project":

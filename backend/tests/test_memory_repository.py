@@ -32,6 +32,7 @@ def make_project(project_id: str) -> Project:
         capacity_claimed=False,
         created_at=created_at,
         updated_at=created_at,
+        owner_token=f"owner-token-{project_id}",
     )
 
 
@@ -72,6 +73,39 @@ class InMemoryProjectRepositoryTests(unittest.TestCase):
         self.assertEqual(repository.active_count, 1)
         self.assertEqual(repository.list_audit_logs(project.id), [initial_audit])
 
+    def test_begin_provisioning_persists_transition_and_audit_once(self) -> None:
+        repository = InMemoryProjectRepository(max_active_projects=1)
+        requested = repository.claim_capacity_and_create(
+            make_project("demo-one-staging")
+        )
+        provisioning_audit = make_audit_log(
+            "audit-provisioning",
+            requested.id,
+            datetime(2026, 8, 12, 12, 0, 1),
+        )
+
+        provisioning = repository.begin_provisioning(
+            requested,
+            provisioning_audit,
+        )
+
+        self.assertEqual(provisioning.status, ProjectStatus.PROVISIONING)
+        self.assertEqual(provisioning.version, requested.version + 1)
+        self.assertEqual(repository.get_project(requested.id), provisioning)
+        self.assertEqual(
+            repository.list_audit_logs(requested.id),
+            [provisioning_audit],
+        )
+
+        with self.assertRaises(ProjectVersionConflict):
+            repository.begin_provisioning(requested, provisioning_audit)
+
+        self.assertEqual(repository.active_count, 1)
+        self.assertEqual(
+            repository.list_audit_logs(requested.id),
+            [provisioning_audit],
+        )
+
     def test_stale_status_write_cannot_overwrite_deleting_project(self) -> None:
         repository = seeded_repository(capacity_claimed=True)
         stale_project = repository.get_project("demo-one-staging")
@@ -89,6 +123,27 @@ class InMemoryProjectRepositoryTests(unittest.TestCase):
             repository.get_project("demo-one-staging").status,
             ProjectStatus.DELETING,
         )
+
+    def test_versioned_save_cannot_replace_owner_token(self) -> None:
+        repository = seeded_repository(capacity_claimed=True)
+        current = repository.get_project("demo-one-staging")
+        replacement = replace(current, owner_token="different-owner-token")
+
+        with self.assertRaisesRegex(ValueError, "owner_token is immutable"):
+            repository.save_project_if_version(replacement)
+
+        self.assertEqual(repository.get_project(current.id), current)
+
+    def test_unversioned_save_cannot_replace_owner_token(self) -> None:
+        repository = seeded_repository(capacity_claimed=True)
+        current = repository.get_project("demo-one-staging")
+
+        with self.assertRaisesRegex(ValueError, "owner_token is immutable"):
+            repository.save_project(
+                replace(current, owner_token="different-owner-token")
+            )
+
+        self.assertEqual(repository.get_project(current.id), current)
 
     def test_complete_deletion_releases_capacity_once_and_is_idempotent(self) -> None:
         repository = seeded_repository(capacity_claimed=True)

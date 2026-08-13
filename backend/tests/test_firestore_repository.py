@@ -181,6 +181,7 @@ def make_project(project_id="demo-api-staging", *, namespace=None, created_at=No
         capacity_claimed=True,
         created_at=created_at,
         updated_at=created_at.replace(second=1),
+        owner_token=f"owner-token-{project_id}",
     )
 
 
@@ -216,6 +217,55 @@ class FirestoreSettingsTests(unittest.TestCase):
 
 
 class FirestoreProjectRepositoryTests(unittest.TestCase):
+    def test_legacy_document_without_owner_token_is_rejected(self):
+        project = make_project()
+        stored = self.repository.save_project(project)
+        document_path = f"projects/{stored.namespace}"
+        del self.client._documents[document_path]["owner_token"]
+
+        with self.assertRaisesRegex(ValueError, "owner_token"):
+            self.repository.get_project(stored.id)
+
+    def test_provisioning_audit_write_failure_rolls_back_status_transition(self):
+        requested = self.repository.claim_capacity_and_create(
+            replace(make_project(), status=ProjectStatus.REQUESTED)
+        )
+        provisioning_audit = make_audit_log(
+            "provisioning",
+            datetime(2026, 8, 12, 9, 30, 1),
+        )
+        self.client.fail_transaction_on_path = (
+            f"projects/{requested.namespace}/auditLogs/{provisioning_audit.id}"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "injected transaction failure"):
+            self.repository.begin_provisioning(requested, provisioning_audit)
+
+        stored = self.repository.get_project(requested.id)
+        self.assertEqual(stored.status, ProjectStatus.REQUESTED)
+        self.assertEqual(stored.version, requested.version)
+        self.assertTrue(stored.capacity_claimed)
+        self.assertEqual(self.active_count(), 1)
+        self.assertEqual(self.repository.list_audit_logs(requested.id), [])
+
+    def test_provisioning_project_write_failure_rolls_back_audit(self):
+        requested = self.repository.claim_capacity_and_create(
+            replace(make_project(), status=ProjectStatus.REQUESTED)
+        )
+        provisioning_audit = make_audit_log(
+            "provisioning",
+            datetime(2026, 8, 12, 9, 30, 1),
+        )
+        self.client.fail_transaction_on_path = f"projects/{requested.namespace}"
+
+        with self.assertRaisesRegex(RuntimeError, "injected transaction failure"):
+            self.repository.begin_provisioning(requested, provisioning_audit)
+
+        stored = self.repository.get_project(requested.id)
+        self.assertEqual(stored.status, ProjectStatus.REQUESTED)
+        self.assertEqual(stored.version, requested.version)
+        self.assertEqual(self.repository.list_audit_logs(requested.id), [])
+
     def test_initial_audit_write_failure_rolls_back_project_and_capacity(self):
         project = make_project()
         initial_audit = make_audit_log(
@@ -246,6 +296,25 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
 
         self.assertEqual(conflict.exception.current_project, deleting)
         self.assertEqual(self.repository.get_project(project.id), deleting)
+
+    def test_versioned_save_cannot_replace_owner_token(self):
+        current = self.repository.claim_capacity_and_create(make_project())
+        replacement = replace(current, owner_token="different-owner-token")
+
+        with self.assertRaisesRegex(ValueError, "owner_token is immutable"):
+            self.repository.save_project_if_version(replacement)
+
+        self.assertEqual(self.repository.get_project(current.id), current)
+
+    def test_unversioned_save_cannot_replace_owner_token(self):
+        current = self.repository.save_project(make_project())
+
+        with self.assertRaisesRegex(ValueError, "owner_token is immutable"):
+            self.repository.save_project(
+                replace(current, owner_token="different-owner-token")
+            )
+
+        self.assertEqual(self.repository.get_project(current.id), current)
 
     def test_complete_deletion_releases_capacity_once_and_is_idempotent(self):
         project = self.repository.claim_capacity_and_create(make_project())

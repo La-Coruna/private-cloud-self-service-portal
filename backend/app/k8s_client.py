@@ -44,6 +44,8 @@ def load_kube_config() -> None:
 def build_common_labels(
     project_id: str, service_name: str, environment: str, owner_token: str
 ) -> dict[str, str]:
+    if not isinstance(owner_token, str) or not owner_token.strip():
+        raise ValueError("owner_token must be a non-empty string")
     return {
         "app.kubernetes.io/managed-by": MANAGED_BY,
         "app.kubernetes.io/name": service_name,
@@ -233,7 +235,7 @@ def create_resource_quota(
     project_id: str,
     service_name: str,
     environment: str,
-    owner_token: str = "",
+    owner_token: str,
 ) -> dict:
     try:
         load_kube_config()
@@ -286,7 +288,7 @@ def create_deployment(
     cpu_limit: str,
     memory_request: str,
     memory_limit: str,
-    owner_token: str = "",
+    owner_token: str,
 ) -> dict:
     try:
         load_kube_config()
@@ -353,7 +355,7 @@ def create_service(
     project_id: str,
     service_name: str,
     environment: str,
-    owner_token: str = "",
+    owner_token: str,
 ) -> dict:
     service_name_with_suffix = f"{service_name}-svc"
     try:
@@ -411,7 +413,7 @@ def create_ingress(
     service_name: str,
     environment: str,
     host: str,
-    owner_token: str = "",
+    owner_token: str,
 ) -> dict:
     settings = get_settings()
     ingress_name = f"{service_name}-ingress"

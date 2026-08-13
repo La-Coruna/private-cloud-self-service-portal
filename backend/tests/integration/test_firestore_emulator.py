@@ -57,6 +57,7 @@ class FirestoreEmulatorIntegrationTest(unittest.TestCase):
             capacity_claimed=True,
             created_at=created_at,
             updated_at=created_at.replace(second=1),
+            owner_token=f"owner-token-{project_id}",
         )
 
     def test_four_concurrent_claims_allow_exactly_three_projects(self) -> None:

@@ -3,7 +3,7 @@ from typing import Any
 
 from google.cloud import firestore
 
-from app.domain import AuditLog, Project, ProjectStatus
+from app.domain import AuditLog, Project, ProjectStatus, utc_now
 from app.repositories.memory import (
     DemoCapacityExceeded,
     ProjectAlreadyExists,
@@ -68,7 +68,7 @@ def _project_from_dict(data: dict[str, Any]) -> Project:
         capacity_claimed=data["capacity_claimed"],
         created_at=_from_firestore_datetime(data["created_at"]),
         updated_at=_from_firestore_datetime(data["updated_at"]),
-        owner_token=data.get("owner_token", ""),
+        owner_token=data.get("owner_token"),
         version=data.get("version", 0),
     )
 
@@ -180,6 +180,8 @@ def _save_if_version(transaction, project_ref, project_data):
     current_data = snapshot.to_dict()
     if current_data.get("version", 0) != project_data.get("version", 0):
         raise ProjectVersionConflict(_project_from_dict(current_data))
+    if current_data.get("owner_token") != project_data.get("owner_token"):
+        raise ValueError("owner_token is immutable")
 
     saved_data = {
         **project_data,
@@ -187,6 +189,48 @@ def _save_if_version(transaction, project_ref, project_data):
     }
     transaction.set(project_ref, saved_data)
     return saved_data
+
+
+@firestore.transactional
+def _save_preserving_owner(transaction, project_ref, project_data):
+    snapshot = project_ref.get(transaction=transaction)
+    if snapshot.exists:
+        current_data = snapshot.to_dict()
+        if current_data.get("owner_token") != project_data.get("owner_token"):
+            raise ValueError("owner_token is immutable")
+    transaction.set(project_ref, project_data)
+    return project_data
+
+
+@firestore.transactional
+def _begin_provisioning(
+    transaction,
+    project_ref,
+    project_data,
+    audit_ref,
+    audit_data,
+):
+    snapshot = project_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        raise ProjectNotFound(project_ref.id)
+
+    current_data = snapshot.to_dict()
+    if (
+        current_data.get("version", 0) != project_data.get("version", 0)
+        or current_data["status"] != ProjectStatus.REQUESTED.value
+    ):
+        raise ProjectVersionConflict(_project_from_dict(current_data))
+
+    provisioning_data = {
+        **current_data,
+        "status": ProjectStatus.PROVISIONING.value,
+        "error_message": None,
+        "updated_at": project_data["updated_at"],
+        "version": current_data.get("version", 0) + 1,
+    }
+    transaction.set(project_ref, provisioning_data)
+    transaction.set(audit_ref, audit_data)
+    return provisioning_data
 
 
 @firestore.transactional
@@ -277,6 +321,20 @@ class FirestoreProjectRepository:
         )
         return _project_from_dict(claimed_data)
 
+    def begin_provisioning(self, project: Project, audit: AuditLog) -> Project:
+        project_ref = self._projects.document(project.namespace)
+        audit_ref = project_ref.collection("auditLogs").document(audit.id)
+        project_data = _project_to_dict(project)
+        project_data["updated_at"] = _to_firestore_datetime(utc_now())
+        provisioning_data = _begin_provisioning(
+            self._client.transaction(max_attempts=20),
+            project_ref,
+            project_data,
+            audit_ref,
+            _audit_log_to_dict(audit),
+        )
+        return _project_from_dict(provisioning_data)
+
     def get_project(self, project_id: str) -> Project | None:
         snapshot = self._projects.document(project_id).get()
         if not snapshot.exists:
@@ -292,8 +350,12 @@ class FirestoreProjectRepository:
 
     def save_project(self, project: Project) -> Project:
         project_data = _project_to_dict(project)
-        self._projects.document(project.namespace).set(project_data)
-        return _project_from_dict(project_data)
+        saved_data = _save_preserving_owner(
+            self._client.transaction(max_attempts=20),
+            self._projects.document(project.namespace),
+            project_data,
+        )
+        return _project_from_dict(saved_data)
 
     def save_project_if_version(self, project: Project) -> Project:
         project_data = _save_if_version(
