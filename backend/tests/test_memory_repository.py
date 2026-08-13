@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from datetime import datetime
 
 from app.domain import AuditLog, Project, ProjectStatus
@@ -7,6 +8,7 @@ from app.repositories.memory import (
     InMemoryProjectRepository,
     ProjectAlreadyExists,
     ProjectNotFound,
+    ProjectVersionConflict,
 )
 
 
@@ -55,6 +57,67 @@ def seeded_repository(*, capacity_claimed: bool = False) -> InMemoryProjectRepos
 
 
 class InMemoryProjectRepositoryTests(unittest.TestCase):
+    def test_claim_capacity_and_create_persists_initial_audit_atomically(self) -> None:
+        repository = InMemoryProjectRepository(max_active_projects=1)
+        project = make_project("demo-one-staging")
+        initial_audit = make_audit_log(
+            "audit-requested",
+            project.id,
+            datetime(2026, 8, 12, 12, 0, 0),
+        )
+
+        claimed = repository.claim_capacity_and_create(project, initial_audit)
+
+        self.assertTrue(claimed.capacity_claimed)
+        self.assertEqual(repository.active_count, 1)
+        self.assertEqual(repository.list_audit_logs(project.id), [initial_audit])
+
+    def test_stale_status_write_cannot_overwrite_deleting_project(self) -> None:
+        repository = seeded_repository(capacity_claimed=True)
+        stale_project = repository.get_project("demo-one-staging")
+        deleting = repository.save_project_if_version(
+            replace(stale_project, status=ProjectStatus.DELETING)
+        )
+
+        with self.assertRaises(ProjectVersionConflict) as conflict:
+            repository.save_project_if_version(
+                replace(stale_project, status=ProjectStatus.RUNNING)
+            )
+
+        self.assertEqual(conflict.exception.current_project, deleting)
+        self.assertEqual(
+            repository.get_project("demo-one-staging").status,
+            ProjectStatus.DELETING,
+        )
+
+    def test_complete_deletion_releases_capacity_once_and_is_idempotent(self) -> None:
+        repository = seeded_repository(capacity_claimed=True)
+        project = repository.get_project("demo-one-staging")
+        deleting = repository.save_project_if_version(
+            replace(project, status=ProjectStatus.DELETING)
+        )
+
+        first = repository.complete_deletion(deleting)
+        second = repository.complete_deletion(deleting)
+
+        self.assertEqual(first, second)
+        self.assertEqual(second.status, ProjectStatus.DELETED)
+        self.assertFalse(second.capacity_claimed)
+        self.assertEqual(repository.active_count, 0)
+
+    def test_complete_deletion_requires_deleting_status(self) -> None:
+        repository = seeded_repository(capacity_claimed=True)
+        requested = repository.get_project("demo-one-staging")
+
+        with self.assertRaises(ProjectVersionConflict):
+            repository.complete_deletion(requested)
+
+        self.assertEqual(repository.active_count, 1)
+        self.assertEqual(
+            repository.get_project(requested.id).status,
+            ProjectStatus.REQUESTED,
+        )
+
     def test_claim_capacity_and_create_is_atomic(self) -> None:
         repository = InMemoryProjectRepository(max_active_projects=1)
 
@@ -66,11 +129,13 @@ class InMemoryProjectRepositoryTests(unittest.TestCase):
         self.assertEqual(repository.active_count, 1)
         self.assertIsNone(repository.get_project("demo-two-staging"))
 
-    def test_claim_capacity_and_create_rejects_duplicate_without_consuming_capacity(self) -> None:
+    def test_claim_rejects_requested_duplicate_with_different_spec(self) -> None:
         repository = seeded_repository(capacity_claimed=True)
+        conflicting = make_project("demo-one-staging")
+        conflicting.image = "caddy:2.8"
 
         with self.assertRaises(ProjectAlreadyExists):
-            repository.claim_capacity_and_create(make_project("demo-one-staging"))
+            repository.claim_capacity_and_create(conflicting)
 
         self.assertEqual(repository.active_count, 1)
 

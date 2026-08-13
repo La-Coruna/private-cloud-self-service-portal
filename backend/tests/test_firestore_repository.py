@@ -2,6 +2,7 @@ import copy
 import importlib
 import sys
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from app.repositories import (
     DemoCapacityExceeded,
     ProjectAlreadyExists,
     ProjectNotFound,
+    ProjectVersionConflict,
 )
 
 
@@ -114,6 +116,9 @@ class FakeTransaction:
         self.write_paths.append(reference.path)
 
     def _commit(self):
+        failing_path = getattr(self._client, "fail_transaction_on_path", None)
+        if failing_path in self.write_paths:
+            raise RuntimeError("injected transaction failure")
         for path, document_data, merge in self._writes:
             self._client._set(path, document_data, merge=merge)
         self._writes.clear()
@@ -211,6 +216,51 @@ class FirestoreSettingsTests(unittest.TestCase):
 
 
 class FirestoreProjectRepositoryTests(unittest.TestCase):
+    def test_initial_audit_write_failure_rolls_back_project_and_capacity(self):
+        project = make_project()
+        initial_audit = make_audit_log(
+            "requested",
+            datetime(2026, 8, 12, 9, 30, 0),
+        )
+        self.client.fail_transaction_on_path = (
+            f"projects/{project.namespace}/auditLogs/{initial_audit.id}"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "injected transaction failure"):
+            self.repository.claim_capacity_and_create(project, initial_audit)
+
+        self.assertIsNone(self.repository.get_project(project.id))
+        self.assertEqual(self.active_count(), 0)
+        self.assertEqual(self.repository.list_audit_logs(project.id), [])
+
+    def test_stale_status_write_cannot_overwrite_deleting_project(self):
+        project = self.repository.claim_capacity_and_create(make_project())
+        deleting = self.repository.save_project_if_version(
+            replace(project, status=ProjectStatus.DELETING)
+        )
+
+        with self.assertRaises(ProjectVersionConflict) as conflict:
+            self.repository.save_project_if_version(
+                replace(project, status=ProjectStatus.RUNNING)
+            )
+
+        self.assertEqual(conflict.exception.current_project, deleting)
+        self.assertEqual(self.repository.get_project(project.id), deleting)
+
+    def test_complete_deletion_releases_capacity_once_and_is_idempotent(self):
+        project = self.repository.claim_capacity_and_create(make_project())
+        deleting = self.repository.save_project_if_version(
+            replace(project, status=ProjectStatus.DELETING)
+        )
+
+        first = self.repository.complete_deletion(deleting)
+        second = self.repository.complete_deletion(deleting)
+
+        self.assertEqual(first, second)
+        self.assertEqual(second.status, ProjectStatus.DELETED)
+        self.assertFalse(second.capacity_claimed)
+        self.assertEqual(self.active_count(), 0)
+
     def setUp(self):
         from app.repositories.firestore import FirestoreProjectRepository
         self.client = FakeFirestoreClient()
@@ -281,8 +331,12 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
 
     def test_claim_reads_and_writes_use_the_same_transaction(self):
         project = make_project()
+        initial_audit = make_audit_log(
+            "requested",
+            datetime(2026, 8, 12, 9, 30, 0),
+        )
 
-        self.repository.claim_capacity_and_create(project)
+        self.repository.claim_capacity_and_create(project, initial_audit)
 
         transactions = self.client.transactions
         self.assertEqual(len(transactions), 1)
@@ -292,7 +346,15 @@ class FirestoreProjectRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(
             transactions[0].write_paths,
-            [f"projects/{project.namespace}", "system/demoCapacity"],
+            [
+                f"projects/{project.namespace}",
+                f"projects/{project.namespace}/auditLogs/{initial_audit.id}",
+                "system/demoCapacity",
+            ],
+        )
+        self.assertEqual(
+            self.repository.list_audit_logs(project.id),
+            [initial_audit],
         )
 
     def test_capacity_transactions_allow_twenty_attempts_for_contention(self):

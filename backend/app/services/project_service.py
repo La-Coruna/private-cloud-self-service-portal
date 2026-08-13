@@ -3,9 +3,9 @@ from typing import Protocol
 
 from app.audit import create_audit_log
 from app.config import Settings
-from app.domain import PlatformAvailability, Project, ProjectStatus, utc_now
+from app.domain import AuditLog, PlatformAvailability, Project, ProjectStatus, utc_now
 from app.k8s_client import KubernetesUnavailableError
-from app.repositories import ProjectNotFound, ProjectRepository
+from app.repositories import ProjectNotFound, ProjectRepository, ProjectVersionConflict
 from app.schemas import ProjectCreateRequest
 
 
@@ -211,14 +211,16 @@ class ProjectService:
             self.settings.demo_namespace_prefix if self.settings.demo_mode else ""
         )
         namespace = f"{namespace_prefix}{request.service_name}-{request.environment}"
-        project = self.repository.claim_capacity_and_create(
-            Project.new(request=request, namespace=namespace)
+        requested_project = Project.new(request=request, namespace=namespace)
+        initial_audit = AuditLog.new(
+            project_id=requested_project.id,
+            action="PROJECT_CREATE_REQUESTED",
+            status="SUCCESS",
+            message=f"Project request saved for namespace={requested_project.namespace}",
         )
-        self._audit(
-            project,
-            "PROJECT_CREATE_REQUESTED",
-            "SUCCESS",
-            f"Project request saved for namespace={project.namespace}",
+        project = self.repository.claim_capacity_and_create(
+            requested_project,
+            initial_audit,
         )
 
         project = self._save(project, status=ProjectStatus.PROVISIONING, error_message=None)
@@ -390,11 +392,23 @@ class ProjectService:
             raise GkeUnavailable(str(exc)) from exc
 
         next_status, status_detail = derive_project_status(pods, events)
-        project = self._save(
-            project,
-            status=next_status,
-            error_message=status_detail if next_status == ProjectStatus.FAILED else None,
-        )
+        try:
+            project = self._save(
+                project,
+                status=next_status,
+                error_message=(
+                    status_detail if next_status == ProjectStatus.FAILED else None
+                ),
+            )
+        except ProjectVersionConflict as conflict:
+            current = conflict.current_project
+            self._audit(
+                current,
+                "PROJECT_STATUS_SYNC_SKIPPED",
+                "SUCCESS",
+                f"Status sync skipped because project changed to {current.status.value}",
+            )
+            return current
         message = f"Kubernetes status synced: {previous_status.value} -> {project.status.value}"
         if status_detail:
             message = f"{message} | {status_detail}"
@@ -434,7 +448,19 @@ class ProjectService:
             raise InvalidLifecycleOperation(
                 ownership.get("message") or "Kubernetes ownership verification failed"
             )
-        project = self._save(project, status=ProjectStatus.DELETING, error_message=None)
+        try:
+            project = self._save(
+                project,
+                status=ProjectStatus.DELETING,
+                error_message=None,
+            )
+        except ProjectVersionConflict as conflict:
+            current = conflict.current_project
+            if current.status == ProjectStatus.DELETED:
+                return current
+            raise InvalidLifecycleOperation(
+                f"Project deletion is already in progress: {project_id}"
+            ) from conflict
         self._audit(
             project,
             "PROJECT_DELETE_REQUESTED",
@@ -486,9 +512,9 @@ class ProjectService:
             )
             return project
 
-        project = self._save(project, status=ProjectStatus.DELETED, error_message=None)
-        if project.capacity_claimed:
-            project = self.repository.release_capacity(project.id)
+        project = self.repository.complete_deletion(
+            replace(project, updated_at=utc_now())
+        )
         self._audit(
             project,
             "PROJECT_DELETED",
@@ -514,7 +540,7 @@ class ProjectService:
             raise GkeUnavailable(platform.message)
 
     def _save(self, project: Project, **changes) -> Project:
-        return self.repository.save_project(
+        return self.repository.save_project_if_version(
             replace(project, updated_at=utc_now(), **changes)
         )
 

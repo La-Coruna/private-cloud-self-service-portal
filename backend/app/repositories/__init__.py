@@ -4,6 +4,7 @@ from app.repositories.memory import (
     InMemoryProjectRepository,
     ProjectAlreadyExists,
     ProjectNotFound,
+    ProjectVersionConflict,
 )
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "InMemoryProjectRepository",
     "ProjectAlreadyExists",
     "ProjectNotFound",
+    "ProjectVersionConflict",
     "ProjectRepository",
 ]

@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -13,7 +14,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.domain import AuditLog, Project, ProjectStatus
-from app.repositories import DemoCapacityExceeded
+from app.repositories import DemoCapacityExceeded, ProjectVersionConflict
 from app.repositories.firestore import FirestoreProjectRepository
 
 
@@ -87,6 +88,76 @@ class FirestoreEmulatorIntegrationTest(unittest.TestCase):
         self.assertEqual(len(claimed_ids), 3)
         self.assertTrue(
             claimed_ids.issubset({project.id for project in projects})
+        )
+
+    def test_concurrent_delete_owners_release_capacity_exactly_once(self) -> None:
+        self.client.document("system/demoCapacity").set(
+            {"active_count": 0, "max_active_projects": 3}
+        )
+        project = self.make_project(f"delete-race-{uuid4().hex}")
+        claimed = self.repository.claim_capacity_and_create(project)
+
+        acquired = []
+        conflicts = []
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(
+                    self.repository.save_project_if_version,
+                    replace(claimed, status=ProjectStatus.DELETING),
+                )
+                for _ in range(2)
+            ]
+            for future in as_completed(futures):
+                try:
+                    acquired.append(future.result())
+                except ProjectVersionConflict as error:
+                    conflicts.append(error)
+
+        self.assertEqual(len(acquired), 1)
+        self.assertEqual(len(conflicts), 1)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            completed = list(
+                executor.map(
+                    self.repository.complete_deletion,
+                    [acquired[0], acquired[0]],
+                )
+            )
+
+        self.assertTrue(
+            all(project.status == ProjectStatus.DELETED for project in completed)
+        )
+        self.assertTrue(all(not project.capacity_claimed for project in completed))
+        self.assertEqual(
+            self.client.document("system/demoCapacity").get().get("active_count"),
+            0,
+        )
+
+    def test_stale_sync_cannot_overwrite_delete_transaction(self) -> None:
+        self.client.document("system/demoCapacity").set(
+            {"active_count": 0, "max_active_projects": 3}
+        )
+        project = self.make_project(f"delete-sync-race-{uuid4().hex}")
+        claimed = self.repository.claim_capacity_and_create(project)
+        deleting = self.repository.save_project_if_version(
+            replace(claimed, status=ProjectStatus.DELETING)
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            completing = executor.submit(self.repository.complete_deletion, deleting)
+            stale_sync = executor.submit(
+                self.repository.save_project_if_version,
+                replace(claimed, status=ProjectStatus.RUNNING),
+            )
+            deleted = completing.result()
+            with self.assertRaises(ProjectVersionConflict):
+                stale_sync.result()
+
+        self.assertEqual(deleted.status, ProjectStatus.DELETED)
+        self.assertFalse(deleted.capacity_claimed)
+        self.assertEqual(self.repository.get_project(project.id), deleted)
+        self.assertEqual(
+            self.client.document("system/demoCapacity").get().get("active_count"),
+            0,
         )
 
     def test_project_and_audit_logs_round_trip_through_new_repository(self) -> None:

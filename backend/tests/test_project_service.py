@@ -1,12 +1,18 @@
 from types import SimpleNamespace
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from unittest.mock import MagicMock
 
 from app.config import Settings
 from app.domain import PlatformAvailability, Project, ProjectStatus
 from app.repositories.memory import InMemoryProjectRepository
 from app.schemas import ProjectCreateRequest
-from app.services.project_service import ProjectService, derive_project_status
+from app.services.project_service import (
+    InvalidLifecycleOperation,
+    ProjectService,
+    derive_project_status,
+)
 
 
 def make_request(*, expose_external: bool = False) -> ProjectCreateRequest:
@@ -226,7 +232,7 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(deleted.status, ProjectStatus.DELETED)
         self.assertEqual(stored.status, ProjectStatus.DELETED)
         self.assertFalse(stored.capacity_claimed)
-        release_capacity.assert_called_once_with(project.id)
+        release_capacity.assert_not_called()
         self.assertEqual(
             [log.action for log in self.repository.list_audit_logs(project.id)],
             [
@@ -246,6 +252,145 @@ class ProjectServiceTests(unittest.TestCase):
                 "NAMESPACE_DELETED",
                 "PROJECT_DELETED",
             ],
+        )
+
+    def test_retry_resumes_requested_project_after_initial_status_save_failure(self) -> None:
+        original_save = self.repository.save_project_if_version
+        self.repository.save_project_if_version = MagicMock(
+            side_effect=RuntimeError("transient Firestore write failure")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "transient Firestore write failure"):
+            self.service.create_project(make_request())
+
+        project_id = "demo-demo-api-staging"
+        stranded = self.repository.get_project(project_id)
+        self.assertEqual(stranded.status, ProjectStatus.REQUESTED)
+        self.assertTrue(stranded.capacity_claimed)
+        self.assertEqual(self.repository.active_count, 1)
+        self.assertEqual(
+            [log.action for log in self.repository.list_audit_logs(project_id)],
+            ["PROJECT_CREATE_REQUESTED"],
+        )
+        self.assertEqual(self.kubernetes.mock_calls, [])
+
+        self.repository.save_project_if_version = original_save
+        call_order: list[str] = []
+        self._configure_successful_create(call_order)
+
+        retried = self.service.create_project(make_request())
+
+        self.assertEqual(retried.status, ProjectStatus.RUNNING)
+        self.assertEqual(self.repository.active_count, 1)
+        self.assertEqual(
+            [log.action for log in self.repository.list_audit_logs(project_id)].count(
+                "PROJECT_CREATE_REQUESTED"
+            ),
+            1,
+        )
+
+    def test_concurrent_deletes_allow_only_one_kubernetes_deletion_owner(self) -> None:
+        project = self._create_running_project()
+        verification_barrier = Barrier(2)
+
+        def verify_ownership(**kwargs) -> dict:
+            verification_barrier.wait()
+            return {"status": "verified"}
+
+        self.kubernetes.verify_project_resources.side_effect = verify_ownership
+        for method_name, result in (
+            ("delete_ingress", deleted_result("ingress", "demo-api-ingress")),
+            ("delete_service", deleted_result("service", "demo-api-svc")),
+            ("delete_deployment", deleted_result("deployment", "demo-api")),
+            (
+                "delete_resource_quota",
+                deleted_result("resourcequota", "portal-resource-quota"),
+            ),
+            ("delete_namespace", deleted_result("namespace", project.namespace)),
+        ):
+            getattr(self.kubernetes, method_name).return_value = result
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(self.service.delete_project, project.id)
+                for _ in range(2)
+            ]
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except InvalidLifecycleOperation as exc:
+                    outcomes.append(exc)
+
+        self.assertEqual(len(outcomes), 2)
+        self.assertTrue(
+            all(
+                isinstance(outcome, (Project, InvalidLifecycleOperation))
+                for outcome in outcomes
+            )
+        )
+        self.assertEqual(self.kubernetes.delete_namespace.call_count, 1)
+        self.assertEqual(self.repository.active_count, 0)
+        self.assertEqual(
+            self.repository.get_project(project.id).status,
+            ProjectStatus.DELETED,
+        )
+
+    def test_stale_sync_cannot_restore_running_after_delete_completes(self) -> None:
+        project = self._create_running_project()
+        sync_read_platform = Event()
+        allow_sync_to_save = Event()
+
+        def delayed_pods(**kwargs) -> list[dict]:
+            sync_read_platform.set()
+            self.assertTrue(allow_sync_to_save.wait(timeout=5))
+            return [
+                {
+                    "name": "demo-api-abc",
+                    "phase": "Running",
+                    "containers": [
+                        {
+                            "name": "demo-api",
+                            "ready": True,
+                            "state": "running",
+                            "reason": None,
+                            "message": None,
+                        }
+                    ],
+                }
+            ]
+
+        self.kubernetes.list_project_pods.side_effect = delayed_pods
+        self.kubernetes.list_project_events.return_value = []
+        self.kubernetes.delete_ingress.return_value = deleted_result(
+            "ingress", "demo-api-ingress"
+        )
+        self.kubernetes.delete_service.return_value = deleted_result(
+            "service", "demo-api-svc"
+        )
+        self.kubernetes.delete_deployment.return_value = deleted_result(
+            "deployment", "demo-api"
+        )
+        self.kubernetes.delete_resource_quota.return_value = deleted_result(
+            "resourcequota", "portal-resource-quota"
+        )
+        self.kubernetes.delete_namespace.return_value = deleted_result(
+            "namespace", project.namespace
+        )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            syncing = executor.submit(self.service.sync_status, project.id)
+            self.assertTrue(sync_read_platform.wait(timeout=5))
+            deleted = self.service.delete_project(project.id)
+            allow_sync_to_save.set()
+            synced = syncing.result(timeout=5)
+
+        self.assertEqual(deleted.status, ProjectStatus.DELETED)
+        self.assertEqual(synced.status, ProjectStatus.DELETED)
+        self.assertEqual(self.repository.active_count, 0)
+        self.assertEqual(
+            self.repository.get_project(project.id).status,
+            ProjectStatus.DELETED,
         )
 
     def test_partial_delete_failure_keeps_capacity_and_records_failure(self) -> None:

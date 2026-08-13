@@ -8,7 +8,9 @@ from app.repositories.memory import (
     DemoCapacityExceeded,
     ProjectAlreadyExists,
     ProjectNotFound,
+    ProjectVersionConflict,
 )
+from app.repositories.base import same_creation_spec
 
 
 def _to_firestore_datetime(value: datetime) -> datetime:
@@ -43,6 +45,7 @@ def _project_to_dict(project: Project) -> dict[str, Any]:
         "created_at": _to_firestore_datetime(project.created_at),
         "updated_at": _to_firestore_datetime(project.updated_at),
         "owner_token": project.owner_token,
+        "version": project.version,
     }
 
 
@@ -66,6 +69,7 @@ def _project_from_dict(data: dict[str, Any]) -> Project:
         created_at=_from_firestore_datetime(data["created_at"]),
         updated_at=_from_firestore_datetime(data["updated_at"]),
         owner_token=data.get("owner_token", ""),
+        version=data.get("version", 0),
     )
 
 
@@ -92,8 +96,25 @@ def _audit_log_from_dict(data: dict[str, Any]) -> AuditLog:
 
 
 @firestore.transactional
-def _claim(transaction, project_ref, capacity_ref, project_data, max_active):
-    if project_ref.get(transaction=transaction).exists:
+def _claim(
+    transaction,
+    project_ref,
+    capacity_ref,
+    project_data,
+    max_active,
+    audit_ref=None,
+    audit_data=None,
+):
+    project_snapshot = project_ref.get(transaction=transaction)
+    if project_snapshot.exists:
+        existing_data = project_snapshot.to_dict()
+        existing = _project_from_dict(existing_data)
+        proposed = _project_from_dict(project_data)
+        if (
+            existing.status == ProjectStatus.REQUESTED
+            and same_creation_spec(existing, proposed)
+        ):
+            return existing_data
         raise ProjectAlreadyExists(project_data["id"])
 
     capacity_snapshot = capacity_ref.get(transaction=transaction)
@@ -102,6 +123,8 @@ def _claim(transaction, project_ref, capacity_ref, project_data, max_active):
         raise DemoCapacityExceeded(max_active)
 
     transaction.set(project_ref, project_data)
+    if audit_ref is not None and audit_data is not None:
+        transaction.set(audit_ref, audit_data)
     transaction.set(
         capacity_ref,
         {
@@ -111,6 +134,7 @@ def _claim(transaction, project_ref, capacity_ref, project_data, max_active):
         },
         merge=True,
     )
+    return project_data
 
 
 @firestore.transactional
@@ -125,8 +149,16 @@ def _release(transaction, project_ref, capacity_ref, max_active):
 
     capacity_snapshot = capacity_ref.get(transaction=transaction)
     active = capacity_snapshot.get("active_count") if capacity_snapshot.exists else 0
-    released_data = {**project_data, "capacity_claimed": False}
-    transaction.set(project_ref, {"capacity_claimed": False}, merge=True)
+    released_data = {
+        **project_data,
+        "capacity_claimed": False,
+        "version": project_data.get("version", 0) + 1,
+    }
+    transaction.set(
+        project_ref,
+        {"capacity_claimed": False, "version": released_data["version"]},
+        merge=True,
+    )
     transaction.set(
         capacity_ref,
         {
@@ -137,6 +169,74 @@ def _release(transaction, project_ref, capacity_ref, max_active):
         merge=True,
     )
     return released_data
+
+
+@firestore.transactional
+def _save_if_version(transaction, project_ref, project_data):
+    snapshot = project_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        raise ProjectNotFound(project_ref.id)
+
+    current_data = snapshot.to_dict()
+    if current_data.get("version", 0) != project_data.get("version", 0):
+        raise ProjectVersionConflict(_project_from_dict(current_data))
+
+    saved_data = {
+        **project_data,
+        "version": project_data.get("version", 0) + 1,
+    }
+    transaction.set(project_ref, saved_data)
+    return saved_data
+
+
+@firestore.transactional
+def _complete_deletion(
+    transaction,
+    project_ref,
+    capacity_ref,
+    project_data,
+    max_active,
+):
+    snapshot = project_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        raise ProjectNotFound(project_ref.id)
+
+    current_data = snapshot.to_dict()
+    if current_data["status"] == ProjectStatus.DELETED.value:
+        return current_data
+    if (
+        current_data.get("version", 0) != project_data.get("version", 0)
+        or current_data["status"] != ProjectStatus.DELETING.value
+    ):
+        raise ProjectVersionConflict(_project_from_dict(current_data))
+
+    capacity_snapshot = None
+    if current_data["capacity_claimed"]:
+        capacity_snapshot = capacity_ref.get(transaction=transaction)
+
+    deleted_data = {
+        **current_data,
+        "status": ProjectStatus.DELETED.value,
+        "error_message": None,
+        "capacity_claimed": False,
+        "updated_at": project_data["updated_at"],
+        "version": current_data.get("version", 0) + 1,
+    }
+    transaction.set(project_ref, deleted_data)
+    if capacity_snapshot is not None:
+        active = (
+            capacity_snapshot.get("active_count") if capacity_snapshot.exists else 0
+        )
+        transaction.set(
+            capacity_ref,
+            {
+                "active_count": max(active - 1, 0),
+                "max_active_projects": max_active,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+    return deleted_data
 
 
 class FirestoreProjectRepository:
@@ -150,17 +250,32 @@ class FirestoreProjectRepository:
         self._projects = client.collection("projects")
         self._capacity = client.document("system/demoCapacity")
 
-    def claim_capacity_and_create(self, project: Project) -> Project:
+    def claim_capacity_and_create(
+        self,
+        project: Project,
+        initial_audit: AuditLog | None = None,
+    ) -> Project:
         project_data = _project_to_dict(project)
         project_data["capacity_claimed"] = True
-        _claim(
+        audit_ref = None
+        audit_data = None
+        if initial_audit is not None:
+            audit_ref = (
+                self._projects.document(project.namespace)
+                .collection("auditLogs")
+                .document(initial_audit.id)
+            )
+            audit_data = _audit_log_to_dict(initial_audit)
+        claimed_data = _claim(
             self._client.transaction(max_attempts=20),
             self._projects.document(project.namespace),
             self._capacity,
             project_data,
             self._max_active_projects,
+            audit_ref,
+            audit_data,
         )
-        return _project_from_dict(project_data)
+        return _project_from_dict(claimed_data)
 
     def get_project(self, project_id: str) -> Project | None:
         snapshot = self._projects.document(project_id).get()
@@ -178,6 +293,24 @@ class FirestoreProjectRepository:
     def save_project(self, project: Project) -> Project:
         project_data = _project_to_dict(project)
         self._projects.document(project.namespace).set(project_data)
+        return _project_from_dict(project_data)
+
+    def save_project_if_version(self, project: Project) -> Project:
+        project_data = _save_if_version(
+            self._client.transaction(max_attempts=20),
+            self._projects.document(project.namespace),
+            _project_to_dict(project),
+        )
+        return _project_from_dict(project_data)
+
+    def complete_deletion(self, project: Project) -> Project:
+        project_data = _complete_deletion(
+            self._client.transaction(max_attempts=20),
+            self._projects.document(project.namespace),
+            self._capacity,
+            _project_to_dict(project),
+            self._max_active_projects,
+        )
         return _project_from_dict(project_data)
 
     def release_capacity(self, project_id: str) -> Project:

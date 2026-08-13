@@ -47,6 +47,7 @@ class Project:
     created_at: datetime
     updated_at: datetime
     owner_token: str = ""
+    version: int = 0
 
     @classmethod
     def new(cls, request: "ProjectCreateRequest", namespace: str) -> "Project":
