@@ -26,6 +26,7 @@ All timestamps use Korea Standard Time (UTC+09:00). This record is intentionally
 | 2026-08-12 22:55 | Commit `99c460c`, Firebase CLI 15.24.0 | GREEN: the Dockerfile now exposes 8080 and expands `${PORT:-8080}` in the Uvicorn command. The rebuilt container listened on `0.0.0.0:8080`; `/health` returned HTTP 200. With the memory repository and no kubeconfig mounted, the response was correctly separated as Firestore `ok`, GKE `UNAVAILABLE`, and aggregate status `degraded`. The one-off container was stopped and removed. |
 | 2026-08-12 22:56 | Fresh post-fix application verification | Backend: 82 tests passed in 0.165 seconds and compilation succeeded. Frontend: 4 files and 24 tests passed in 3.00 seconds, lint exited zero, and the production build again produced `dist/index.html`. |
 | 2026-08-13 18:49 | Serverless infrastructure Task 1 | Captured the sanitized pre-change inventory, enabled exactly the seven approved APIs, and reran the idempotent script. Both executions exited zero; an independent query returned all seven names with no missing or unexpected service. No Firebase registration, Firestore database, Cloud Run service, IAM identity, GKE setting, workload, ingress, or DNS record was created or changed. |
+| 2026-08-13 19:01 | Serverless infrastructure Task 2 | Created the `(default)` Firestore database in `asia-northeast3` using Firestore Native mode. An independent describe confirmed the immutable location and type, and a second script run returned `no-op`. No Firebase registration, IAM, GKE, DNS, or deployment change was made. |
 
 ## Infrastructure Task 1 inventory and API enablement
 
@@ -52,6 +53,20 @@ Before API enablement:
 - `iam.googleapis.com`
 
 The first execution exited zero and printed all seven service names. A second execution also exited zero and printed the identical set. A separate enabled-service query at `2026-08-13 18:49:01 KST` reported seven matches, zero missing services, and zero unexpected services.
+
+## Infrastructure Task 2 Firestore provisioning
+
+The preflight confirmed that the active gcloud account was the explicitly approved deployment account and that the active, accessible project was the expected project. The comparison result was recorded without printing or storing the account identity. A fresh description showed that `(default)` did not exist before provisioning.
+
+The decision function was exercised with absent, Seoul Native, wrong-location, and wrong-type fixtures. Script contract tests also verified PowerShell syntax, exactly one create call for an absent database, no create call on the second run, and a hard stop before mutation for an incompatible existing database. The first live attempt stopped before creation because Windows PowerShell promoted the expected `describe` NOT_FOUND output to an error record. A focused regression test reproduced that boundary behavior; the script now temporarily inspects the native command exit code for that describe call and restores strict error handling immediately afterward.
+
+At `2026-08-13 19:01 KST`, the script created the default database once with:
+
+- location: `asia-northeast3`
+- type: `FIRESTORE_NATIVE`
+- database name: `(default)`
+
+An independent read returned the same location and type. The immediate second execution exited zero with `result=no-op`, proving idempotency against the live database. Firestore database location is immutable, so the script refuses to continue if an existing default database is outside Seoul or is not Native mode. This task did not register the project with Firebase, create or modify IAM identities, alter GKE or DNS, or deploy an application.
 
 ## Current local workflow
 
