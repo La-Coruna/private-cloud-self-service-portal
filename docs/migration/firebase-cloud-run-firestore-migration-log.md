@@ -25,6 +25,33 @@ All timestamps use Korea Standard Time (UTC+09:00). This record is intentionally
 | 2026-08-12 22:53 | Docker 29.6.1 (build 8900f1d), image `portal-backend:firestore-local` | RED: the image built, but a container started with `PORT=8080` and host mapping `8080:8080` returned an empty response at `/health`. Container evidence showed the environment contained `PORT=8080` while the image command still forced Uvicorn to port 8000. |
 | 2026-08-12 22:55 | Commit `99c460c`, Firebase CLI 15.24.0 | GREEN: the Dockerfile now exposes 8080 and expands `${PORT:-8080}` in the Uvicorn command. The rebuilt container listened on `0.0.0.0:8080`; `/health` returned HTTP 200. With the memory repository and no kubeconfig mounted, the response was correctly separated as Firestore `ok`, GKE `UNAVAILABLE`, and aggregate status `degraded`. The one-off container was stopped and removed. |
 | 2026-08-12 22:56 | Fresh post-fix application verification | Backend: 82 tests passed in 0.165 seconds and compilation succeeded. Frontend: 4 files and 24 tests passed in 3.00 seconds, lint exited zero, and the production build again produced `dist/index.html`. |
+| 2026-08-13 18:49 | Serverless infrastructure Task 1 | Captured the sanitized pre-change inventory, enabled exactly the seven approved APIs, and reran the idempotent script. Both executions exited zero; an independent query returned all seven names with no missing or unexpected service. No Firebase registration, Firestore database, Cloud Run service, IAM identity, GKE setting, workload, ingress, or DNS record was created or changed. |
+
+## Infrastructure Task 1 inventory and API enablement
+
+The pre-change checks used the expected GCP project and the existing `portal-demo-standard` Kubernetes context. The active gcloud and Firebase identities were compared for equality without recording either identity; they matched after reauthentication. Firebase CLI 15.24.0 was invoked with the already-installed Node.js 20 runtime because Node.js 24 intermittently terminated the Windows CLI with a libuv assertion after otherwise successful commands.
+
+Before API enablement:
+
+- Three of the seven planned services were enabled: Artifact Registry, GKE, and IAM.
+- Cloud Run, Firestore, Firebase Management, and Firebase Hosting APIs were disabled. Consequently, the first Cloud Run and Firestore inventory calls could not query those services. Immediately after API enablement, both inventories completed and contained zero Cloud Run services and zero Firestore databases; enabling the APIs did not provision either resource.
+- The GCP project was accessible, but it was not yet present in the authenticated Firebase project list. This is the expected pre-registration state; `firebase projects:addfirebase` was deliberately not run in this task.
+- The planned `portal-cloud-run` service account did not exist.
+- The GKE cluster was `RUNNING`. Its DNS endpoint existed but did not allow external DNS traffic, while its IP endpoint remained available for rollback.
+- The cluster contained 43 Deployments, StatefulSets, and DaemonSets. The existing `portal-system` workloads were `portal-backend`, `portal-frontend`, and `portal-mariadb`.
+- Two ingresses had two assigned addresses. The public portal hostname returned one A record, and that answer matched an existing ingress address. The address itself is intentionally omitted from this record.
+
+`infra/gcp/serverless/01-enable-serverless-apis.ps1` enabled and verified exactly:
+
+- `run.googleapis.com`
+- `firestore.googleapis.com`
+- `firebase.googleapis.com`
+- `firebasehosting.googleapis.com`
+- `artifactregistry.googleapis.com`
+- `container.googleapis.com`
+- `iam.googleapis.com`
+
+The first execution exited zero and printed all seven service names. A second execution also exited zero and printed the identical set. A separate enabled-service query at `2026-08-13 18:49:01 KST` reported seven matches, zero missing services, and zero unexpected services.
 
 ## Current local workflow
 
