@@ -27,6 +27,7 @@ All timestamps use Korea Standard Time (UTC+09:00). This record is intentionally
 | 2026-08-12 22:56 | Fresh post-fix application verification | Backend: 82 tests passed in 0.165 seconds and compilation succeeded. Frontend: 4 files and 24 tests passed in 3.00 seconds, lint exited zero, and the production build again produced `dist/index.html`. |
 | 2026-08-13 18:49 | Serverless infrastructure Task 1 | Captured the sanitized pre-change inventory, enabled exactly the seven approved APIs, and reran the idempotent script. Both executions exited zero; an independent query returned all seven names with no missing or unexpected service. No Firebase registration, Firestore database, Cloud Run service, IAM identity, GKE setting, workload, ingress, or DNS record was created or changed. |
 | 2026-08-13 19:01 | Serverless infrastructure Task 2 | Created the `(default)` Firestore database in `asia-northeast3` using Firestore Native mode. An independent describe confirmed the immutable location and type, and a second script run returned `no-op`. No Firebase registration, IAM, GKE, DNS, or deployment change was made. |
+| 2026-08-14 13:08 | Serverless infrastructure Task 4 | Enabled external access to the existing GKE DNS control-plane endpoint with the one approved cluster update. Independent verification retained both IP endpoints, kept Kubernetes tokens and certificates via DNS disabled, and found no authorized-network change. A DNS-endpoint `kubectl get nodes` returned one of one nodes Ready, the original context was preserved, and the idempotent rerun returned `no-op`. |
 
 ## Infrastructure Task 1 inventory and API enablement
 
@@ -79,6 +80,38 @@ The approved manifest created one ClusterRole and one ClusterRoleBinding for the
 An early check used `pods/exec` as if it were a resource name and produced a misleading `yes`; that form is not valid proof of the exec subresource. Before completion, the contract was corrected to use `kubectl auth can-i create pods --subresource=exec`, which returned `no`. The corresponding `get pods --subresource=log` check also returned `no`. Fresh checks returned `yes` for creating Deployments and deleting namespaces, and `no` for reading secrets, creating ClusterRoles, and updating nodes. The repository contract now uses this explicit subresource syntax.
 
 This task did not change GKE endpoint settings, deploy Cloud Run or Firebase Hosting, modify DNS, or remove any rollback resource.
+
+## Infrastructure Task 4 GKE DNS control-plane endpoint
+
+The preflight matched the approved new deployment account without recording its identity, and matched project `private-cloud-portal-demo-2`, cluster `portal-demo-standard`, zone `asia-northeast3-a`, and cluster status `RUNNING`. The script rejects any other account, project, cluster, or zone before mutation. It also validates the exact known property set for the DNS and IP endpoint configurations so that a missing or newly introduced endpoint flag cannot be silently treated as false.
+
+The complete sanitized endpoint flags immediately before and after the change were:
+
+| Control-plane property | Before | After |
+| --- | --- | --- |
+| DNS endpoint present | true | true |
+| External DNS traffic allowed | false | true |
+| Kubernetes tokens via DNS | false | false |
+| Kubernetes certificates via DNS | false | false |
+| IP endpoints enabled | true | true |
+| Public IP endpoint enabled | true | true |
+| Public IP endpoint present | true | true |
+| Private IP endpoint present | true | true |
+| Authorized networks configured | false | false |
+
+The only mutation command issued by the script was:
+
+```text
+gcloud container clusters update portal-demo-standard --zone asia-northeast3-a --project private-cloud-portal-demo-2 --enable-dns-access
+```
+
+No IP-access disable flag, authorized-network flag, or token/certificate-via-DNS flag was passed. A separate post-update description reproduced the after-state above. The immediate second script execution returned `result=no-op` and emitted identical before/after flags, demonstrating live idempotency.
+
+For the bounded connectivity check, the previous kubectl current context was recorded and the DNS credentials were generated only in a temporary kubeconfig. `gcloud container clusters get-credentials` used the approved project, cluster, zone, and `--dns-endpoint`; the only Kubernetes operation was read-only `kubectl get nodes`. It returned one node and one Ready node. The temporary kubeconfig was deleted in `finally`, the original kubeconfig environment was restored, and the original current context compared equal afterward. No credential material or endpoint address was written to this log or retained outside the normal local configuration.
+
+PowerShell syntax and mocked command-contract tests passed. The contract accepts only the exact update command above, proves a disabled endpoint is updated once, proves a repeat is a no-op, and stops before update for the previous account, token-via-DNS enablement, public-IP disablement, or an unexpected cluster zone.
+
+This task did not deploy Cloud Run or Firebase Hosting, modify Kubernetes workloads or RBAC, change application DNS records, alter authorized networks, or remove any GKE rollback endpoint.
 
 ## Current local workflow
 
