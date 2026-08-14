@@ -1,0 +1,52 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-cloud-run-gke-access
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+      - resourcequotas
+      - services
+      - pods
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal-cloud-run-gke-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal-cloud-run-gke-access
+subjects:
+  - kind: User
+    apiGroup: rbac.authorization.k8s.io
+    name: portal-cloud-run@private-cloud-portal-demo-2.iam.gserviceaccount.com

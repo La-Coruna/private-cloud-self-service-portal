@@ -68,6 +68,18 @@ At `2026-08-13 19:01 KST`, the script created the default database once with:
 
 An independent read returned the same location and type. The immediate second execution exited zero with `result=no-op`, proving idempotency against the live database. Firestore database location is immutable, so the script refuses to continue if an existing default database is outside Seoul or is not Native mode. This task did not register the project with Firebase, create or modify IAM identities, alter GKE or DNS, or deploy an application.
 
+## Infrastructure Task 3 Cloud Run identity and least-privilege access
+
+Before mutation, the proposed permanent grants were presented for a separate security checkpoint. The user explicitly approved only `roles/datastore.user`, `roles/container.viewer`, and `roles/logging.logWriter` for the dedicated Cloud Run runtime identity, plus cluster-scoped `get`, `list`, `watch`, `create`, and `delete` on namespaces, resource quotas, services, pods, events, Deployments, and Ingresses. The approval expressly excluded secrets, Kubernetes RBAC, nodes, pod exec, and pod logs. No broader role was inferred from the approval.
+
+The identity configuration created the dedicated service account and granted the three approved, unconditional project roles. An independent live-policy query found exactly those three roles and no conditional or unexpected binding. The idempotency run returned `result=no-op` with the same exact role set.
+
+The approved manifest created one ClusterRole and one ClusterRoleBinding for the IAM service-account identity represented as a Kubernetes `User`. A client dry run and idempotent live reapply reported both objects unchanged. A separate structural read found exactly three rules, the seven approved resources, the five approved verbs, one subject, and the expected role reference.
+
+An early check used `pods/exec` as if it were a resource name and produced a misleading `yes`; that form is not valid proof of the exec subresource. Before completion, the contract was corrected to use `kubectl auth can-i create pods --subresource=exec`, which returned `no`. The corresponding `get pods --subresource=log` check also returned `no`. Fresh checks returned `yes` for creating Deployments and deleting namespaces, and `no` for reading secrets, creating ClusterRoles, and updating nodes. The repository contract now uses this explicit subresource syntax.
+
+This task did not change GKE endpoint settings, deploy Cloud Run or Firebase Hosting, modify DNS, or remove any rollback resource.
+
 ## Current local workflow
 
 - `REPOSITORY_BACKEND=memory` is the fast, database-free development path.
