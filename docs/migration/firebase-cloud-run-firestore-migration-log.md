@@ -152,3 +152,13 @@ Fresh default-domain checks returned:
 - HTTP 200 JSON `[]` for `/api/projects`.
 
 No custom domain, DNS record, legacy GKE portal workload, MariaDB workload, or persistent volume was changed. Those resources remain available for rollback. Remaining gates are custom-domain cutover, the planned Spot replacement recovery exercise, observation, and separately approved legacy cleanup.
+
+## Post-deployment creation verification: GKE RBAC subject correction
+
+The first Firebase-default-domain project requests reached Cloud Run and Firestore, but Namespace creation returned HTTP 403 from GKE. The runtime token was authenticated as Kubernetes User `108539215400181858477`, which is the immutable unique ID of `portal-cloud-run@private-cloud-portal-demo-2.iam.gserviceaccount.com`. The ClusterRoleBinding instead named the service-account email. Authorization checks proved the mismatch directly: the email subject could create and delete Namespaces, while the unique-ID subject could not.
+
+A regression contract was changed first and failed against the email subject. The ClusterRole rules were not changed: the exact seven resources and five approved verbs remained, and secrets, nodes, RBAC, Pod exec, and Pod logs remained denied. Only the ClusterRoleBinding User name changed to the runtime service-account unique ID. Client and server dry runs passed; the live apply reported the ClusterRole unchanged and the ClusterRoleBinding configured. The least-privilege contract then passed with create/delete allowed for the approved resources and the forbidden checks still returning no.
+
+The two failed requests were cleaned through the normal DELETE API and reached `DELETED`. A fresh temporary project, `demo-rbac-check`, then completed Namespace, ResourceQuota, Deployment, Service, and Ingress creation. Its Deployment became Available, its Pod was Ready with zero restarts, the generated Ingress returned the nginx welcome page over HTTP, all creation audit actions were `SUCCESS`, and status sync remained `RUNNING`. The project was deleted through the API; the asynchronous Namespace deletion completed, and final health remained Firestore `ok` and GKE `AVAILABLE`.
+
+No broader IAM role, Kubernetes verb, resource type, secret access, node access, Pod exec, or Pod log access was added.

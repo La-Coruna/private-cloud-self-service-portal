@@ -75,3 +75,9 @@ This is the useful migration lesson: local unit and emulator checks protected th
 ## What is verified after the default-domain release
 
 Verified in production: Cloud Run runtime identity, Firestore access, GKE DNS endpoint authentication, system-CA TLS, same-origin Firebase-to-Cloud-Run routing, SPA direct paths, and an empty Firestore project list. Still gated: the custom-domain switch, an intentional Spot-node replacement recovery test, an observation window, and any legacy resource removal.
+
+## The first real create request found an identity-shape mismatch
+
+The default-domain read checks were green, but the first real project creation stopped at Namespace creation with a GKE 403. Cloud Run was using the intended service account; the subtlety was how that account appeared to Kubernetes. The access token was authenticated as the service account's numeric unique ID, while the ClusterRoleBinding named its email address. They represented the same Google identity to an operator, but they were different Kubernetes User strings for RBAC matching.
+
+The correction changed only the binding subject. The approved resources and verbs stayed identical, and checks for secrets, nodes, Kubernetes RBAC, Pod exec, and Pod logs still returned no. A temporary nginx project then exercised the entire path: Firestore request and audit writes, Namespace and quota, Deployment and Ready Pod, Service, Ingress, public HTTP response, status synchronization, reverse-order deletion, and asynchronous Namespace removal. The final portal health remained Firestore `ok` and GKE `AVAILABLE`.

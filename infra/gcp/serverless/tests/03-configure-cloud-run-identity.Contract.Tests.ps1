@@ -90,8 +90,8 @@ catch {
 Assert-SetEqual (@($expectedRoles) + 'roles/editor') @($script:fake.Roles) 'an unexpected role must never be removed or concealed automatically'
 
 $manifest = Get-Content -Raw -LiteralPath $manifestPath
-if ($manifest -notmatch 'kind:\s+User\s+[\s\S]*?name:\s+portal-cloud-run@private-cloud-portal-demo-2\.iam\.gserviceaccount\.com') {
-  throw 'RBAC subject must be the exact IAM service account as a User.'
+if ($manifest -notmatch 'kind:\s+User\s+[\s\S]*?name:\s+"108539215400181858477"') {
+  throw 'RBAC subject must be the runtime service account unique ID presented by GKE.'
 }
 
 $allowedResources = @('deployments', 'events', 'ingresses', 'namespaces', 'pods', 'resourcequotas', 'services')
@@ -113,7 +113,7 @@ function Assert-KubectlPermission {
     [Parameter(Mandatory = $true)][ValidateSet('yes', 'no')][string]$Expected
   )
 
-  $identity = 'portal-cloud-run@private-cloud-portal-demo-2.iam.gserviceaccount.com'
+  $identity = '108539215400181858477'
   $arguments = @('auth', 'can-i', $Verb, $Resource)
   if (-not [string]::IsNullOrWhiteSpace($Subresource)) {
     $arguments += "--subresource=$Subresource"
