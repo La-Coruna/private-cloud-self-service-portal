@@ -1,4 +1,3 @@
-import base64
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,7 +20,7 @@ class FakeCredentials:
 
 
 class KubernetesAuthenticationLifecycleTests(unittest.TestCase):
-    def test_repeated_gke_builds_reuse_client_and_cleanup_one_owned_ca_file(self) -> None:
+    def test_repeated_gke_builds_reuse_client_without_creating_a_ca_file(self) -> None:
         cleanup = getattr(k8s_auth, "close_cached_api_client", None)
         self.assertIsNotNone(cleanup, "GKE client lifecycle cleanup is missing")
         cleanup()
@@ -30,11 +29,7 @@ class KubernetesAuthenticationLifecycleTests(unittest.TestCase):
         credentials = FakeCredentials()
         response = MagicMock()
         response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "masterAuth": {
-                "clusterCaCertificate": base64.b64encode(b"test-ca").decode("ascii")
-            }
-        }
+        response.json.return_value = {}
         authorized_session = MagicMock()
         authorized_session.get.return_value = response
         settings = Settings(
@@ -67,13 +62,12 @@ class KubernetesAuthenticationLifecycleTests(unittest.TestCase):
 
                 ca_files = list(Path(temp_dir).iterdir())
                 self.assertIs(second_client, first_client)
-                self.assertEqual(len(ca_files), 1)
-                mkstemp.assert_called_once()
-                chmod.assert_called_once_with(ca_files[0], 0o600)
+                self.assertEqual(ca_files, [])
+                mkstemp.assert_not_called()
+                chmod.assert_not_called()
                 authorized_session.close.assert_called_once_with()
 
                 cleanup()
-                self.assertFalse(ca_files[0].exists())
 
 
 if __name__ == "__main__":

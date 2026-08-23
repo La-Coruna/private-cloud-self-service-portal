@@ -81,7 +81,6 @@ def _build_gke_api_client(settings: Settings) -> client.ApiClient:
 
     configuration = client.Configuration()
     configuration.host = settings.gke_dns_endpoint
-    configuration.ssl_ca_cert = _cluster_ca_path(cluster)
     configuration.api_key["authorization"] = credentials.token
     configuration.api_key_prefix["authorization"] = "Bearer"
 
@@ -126,7 +125,8 @@ def build_api_client(settings: Settings) -> client.ApiClient:
         if _cached_api_client is not None and _cached_settings is settings:
             return _cached_api_client
         next_api_client = _build_gke_api_client(settings)
-        next_ca_path = Path(next_api_client.configuration.ssl_ca_cert)
+        ssl_ca_cert = next_api_client.configuration.ssl_ca_cert
+        next_ca_path = Path(ssl_ca_cert) if ssl_ca_cert else None
         previous_api_client = _cached_api_client
         previous_ca_path = _cached_ca_path
         _cached_api_client = next_api_client

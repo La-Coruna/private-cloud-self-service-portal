@@ -1,5 +1,3 @@
-import base64
-from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
 from kubernetes import client
@@ -35,16 +33,11 @@ class KubernetesAuthenticationTests(unittest.TestCase):
         self.addCleanup(api_client.close)
         load_kube_config.assert_called_once_with(context="kind-portal-dev")
 
-    def test_gke_mode_uses_adc_and_the_exact_dns_endpoint_and_cluster_ca(self) -> None:
+    def test_gke_mode_uses_adc_dns_endpoint_and_system_ca_trust(self) -> None:
         credentials = FakeCredentials()
-        ca_pem = b"-----BEGIN CERTIFICATE-----\ntest-ca\n-----END CERTIFICATE-----\n"
         response = MagicMock()
         response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "masterAuth": {
-                "clusterCaCertificate": base64.b64encode(ca_pem).decode("ascii")
-            }
-        }
+        response.json.return_value = {}
         authorized_session = MagicMock()
         authorized_session.get.return_value = response
         settings = Settings(
@@ -65,14 +58,12 @@ class KubernetesAuthenticationTests(unittest.TestCase):
             api_client = build_api_client(settings)
 
         self.addCleanup(api_client.close)
-        ca_path = Path(api_client.configuration.ssl_ca_cert)
-        self.addCleanup(ca_path.unlink, missing_ok=True)
         default_credentials.assert_called_once_with(scopes=[CLOUD_PLATFORM_SCOPE])
         self.assertEqual(
             api_client.configuration.host,
             "https://portal-cluster.example.gke.goog",
         )
-        self.assertEqual(ca_path.read_bytes(), ca_pem)
+        self.assertIsNone(api_client.configuration.ssl_ca_cert)
         self.assertEqual(
             authorized_session.get.call_args.args[0],
             "https://container.googleapis.com/v1/projects/portal-project/locations/"
@@ -83,11 +74,7 @@ class KubernetesAuthenticationTests(unittest.TestCase):
         credentials = FakeCredentials()
         response = MagicMock()
         response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "masterAuth": {
-                "clusterCaCertificate": base64.b64encode(b"test-ca").decode("ascii")
-            }
-        }
+        response.json.return_value = {}
         authorized_session = MagicMock()
         authorized_session.get.return_value = response
         settings = Settings(
@@ -108,8 +95,6 @@ class KubernetesAuthenticationTests(unittest.TestCase):
         ):
             api_client = build_api_client(settings)
             self.addCleanup(api_client.close)
-            ca_path = Path(api_client.configuration.ssl_ca_cert)
-            self.addCleanup(ca_path.unlink, missing_ok=True)
             credentials.expired = True
             credentials.valid = False
             transport_response = object()
