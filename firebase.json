@@ -8,6 +8,14 @@
     ],
     "rewrites": [
       {
+        "regex": "^/(api/.*|health)$",
+        "run": {
+          "serviceId": "portal-backend",
+          "region": "asia-northeast3",
+          "pinTag": true
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

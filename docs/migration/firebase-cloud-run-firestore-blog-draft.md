@@ -61,3 +61,17 @@ Removal is deliberately split into later approvals. Stateless legacy portal comp
 Verified locally: frontend unit tests and production build, memory-backed backend behavior, Firestore transaction retry configuration, concurrent demo-capacity enforcement, persistence across repository reconstruction, audit ordering, Firebase emulator/Hosting configuration, and the backend container's `$PORT=8080` health contract.
 
 Still gated: deployed Cloud Run runtime and IAM behavior, Firestore location and production access, GKE DNS endpoint authentication, Firebase-to-Cloud-Run routing, custom-domain TLS, 24-hour observation, cleanup, and measured cost results. Those facts should be added only after their respective commands have run and their evidence has been recorded.
+
+## The deployed path exposed two production-only integration edges
+
+The first Cloud Run revision could reach the GKE DNS control-plane hostname, but Kubernetes calls failed before authentication with an SSL issuer error. The DNS-endpoint kubeconfig and a direct certificate comparison identified the mismatch: the public `*.gke.goog` endpoint must use the system trust store, while the client was forcing the cluster-private CA returned by the Container API. Removing that override and allowing an absent owned CA path kept token refresh and client caching intact. The full backend suite passed 106 tests, and the replacement revision reported Firestore `ok` and one Ready schedulable GKE node.
+
+Firebase Hosting then surfaced a separate deployment-tool edge. Node.js 24 intermittently ended Firebase CLI commands with a Windows libuv assertion after the command had already produced a valid result, so the repeatable deployment wrapper runs the installed Firebase CLI through an isolated Node.js 20 runtime. The first Hosting finalize still failed because `/api/**` and `/health` each asked the CLI to pin the same Cloud Run service. The CLI fetched the service twice and replaced both copies concurrently; one update created the tag and the other lost the race.
+
+The routing contract did not need two service mutations. A single RE2 rewrite now covers both API and health paths, pins one Cloud Run revision, and precedes the React SPA fallback. The next release finalized successfully. The Firebase default domain served HTML for the root, project list, and direct project-detail routes, while `/health`, `/api/platform-status`, and `/api/projects` returned JSON from Cloud Run. Firestore was empty by design, and GKE reported the platform available.
+
+This is the useful migration lesson: local unit and emulator checks protected the application contract, but the public deployment still tested certificate trust, runtime tooling, revision tagging, and rewrite ordering as one system. Each failure stopped before custom-domain cutover, so the legacy GKE portal and MariaDB storage remained untouched as rollback assets.
+
+## What is verified after the default-domain release
+
+Verified in production: Cloud Run runtime identity, Firestore access, GKE DNS endpoint authentication, system-CA TLS, same-origin Firebase-to-Cloud-Run routing, SPA direct paths, and an empty Firestore project list. Still gated: the custom-domain switch, an intentional Spot-node replacement recovery test, an observation window, and any legacy resource removal.

@@ -39,3 +39,4 @@ private-worklog/
 
 # Codex local execution logs
 .codex/
+.firebase/

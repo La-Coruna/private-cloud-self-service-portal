@@ -129,3 +129,26 @@ The legacy GKE portal manifests, MariaDB workload, and persistent storage remain
 ## Remaining gates
 
 Local application verification now covers the container's `$PORT` contract, but it does not prove deployed Cloud Run runtime or IAM behavior, GKE DNS endpoint access, Firebase Hosting rewrites to a deployed backend, custom-domain TLS, or production rollback. Those belong to later reviewed phases and require explicit authorization.
+
+## Infrastructure Task 5 Cloud Run deployment and GKE DNS TLS correction
+
+The backend was deployed from commit `01e727e` as Cloud Run revision `portal-backend-00004-kcq`. Before that deployment, revision `portal-backend-00003-fr8` reached the GKE DNS endpoint but failed TLS verification because the client forced the cluster-private CA onto a public `*.gke.goog` endpoint. A temporary DNS-endpoint kubeconfig contained no cluster CA, and a direct TLS comparison showed that system trust reached the endpoint while the cluster CA failed verification.
+
+The application now leaves `ssl_ca_cert` unset for DNS-endpoint mode, so the Kubernetes client uses the system trust store. The cache lifecycle accepts the absence of an owned CA file. Focused authentication and platform-status tests passed 11 tests, and the full backend suite passed 106 tests. After deployment, the Cloud Run URL returned HTTP 200 for `/health`, `/api/platform-status`, and `/api/projects`; Firestore reported `ok`, GKE reported `AVAILABLE` with one Ready schedulable node, and Firestore returned an empty project list.
+
+## Infrastructure Task 6 Firebase Hosting and Cloud Run rewrite
+
+The Firebase default project alias was set to `private-cloud-portal-demo-2`. Frontend verification passed 4 files and 24 tests, lint exited zero, and the production build generated five Hosting files. The Hosting emulator returned HTTP 200 with the React root for `/`, `/projects`, and `/projects/demo-api-staging`.
+
+Two deployment boundaries were diagnosed before the successful release. The globally installed Firebase CLI 15.24.0 terminated under Node.js 24 with a Windows libuv assertion after otherwise successful commands, so the deployment script now invokes the installed CLI through an isolated Node.js 20 runtime. The first Hosting finalize attempt then exposed a Firebase CLI pinning race: two `pinTag: true` rewrites targeting the same Cloud Run service produced two concurrent service replacements. One replacement added the Firebase tag and the other failed on stale service state.
+
+The equivalent API paths were consolidated into one RE2 rewrite, `^/(api/.*|health)$`, followed by the SPA fallback. This keeps a single pinned Cloud Run revision for both API and health traffic and avoids duplicate service mutation. The subsequent Hosting version finalized and released successfully at `https://private-cloud-portal-demo-2.web.app`.
+
+Fresh default-domain checks returned:
+
+- HTTP 200 HTML with the React root for `/`, `/projects`, and `/projects/demo-api-staging`.
+- HTTP 200 JSON for `/health`, with Firestore `ok` and GKE `AVAILABLE`.
+- HTTP 200 JSON for `/api/platform-status`, with project creation allowed.
+- HTTP 200 JSON `[]` for `/api/projects`.
+
+No custom domain, DNS record, legacy GKE portal workload, MariaDB workload, or persistent volume was changed. Those resources remain available for rollback. Remaining gates are custom-domain cutover, the planned Spot replacement recovery exercise, observation, and separately approved legacy cleanup.
