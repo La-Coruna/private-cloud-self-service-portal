@@ -82,7 +82,7 @@ class PlatformStatusService:
                 _request_timeout=KUBERNETES_REQUEST_TIMEOUT,
             )
         except EXPECTED_PLATFORM_ERRORS:
-            logger.info("Kubernetes platform status check failed", exc_info=True)
+            logger.warning("Kubernetes platform status check failed", exc_info=True)
             return PlatformStatus(
                 status=PlatformAvailability.UNAVAILABLE,
                 message=PLATFORM_UNAVAILABLE_MESSAGE,
